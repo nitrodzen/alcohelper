@@ -1,0 +1,110 @@
+"use client";
+
+import { FormEvent, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { signIn } from "next-auth/react";
+import { LockKeyhole, LogIn, UserPlus } from "lucide-react";
+
+type Mode = "signin" | "register";
+
+export function AuthForm({ mode }: { mode: Mode }) {
+  const router = useRouter();
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setLoading(true);
+
+    const form = new FormData(event.currentTarget);
+    const email = String(form.get("email") ?? "");
+    const password = String(form.get("password") ?? "");
+
+    if (mode === "register") {
+      const response = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: String(form.get("name") ?? ""),
+          email,
+          password,
+          ageConfirmed: form.get("ageConfirmed") === "on",
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setError(data.error ?? "Не удалось создать аккаунт.");
+        setLoading(false);
+        return;
+      }
+    }
+
+    const result = await signIn("credentials", {
+      email,
+      password,
+      redirect: false,
+      callbackUrl: "/",
+    });
+
+    setLoading(false);
+
+    if (result?.error) {
+      setError("Неверный email или пароль.");
+      return;
+    }
+
+    router.push("/");
+    router.refresh();
+  }
+
+  const isRegister = mode === "register";
+
+  return (
+    <section className="auth-shell">
+      <div className="auth-panel">
+        <div className="auth-icon">
+          <LockKeyhole size={24} />
+        </div>
+        <h1>{isRegister ? "Создать доступ" : "Войти в портал"}</h1>
+        <p>Закрытый помощник для домашнего бара. Используйте только если вам уже можно употреблять алкоголь по вашим правилам и законам.</p>
+        <form className="stack-form" onSubmit={onSubmit}>
+          {isRegister ? (
+            <label>
+              Имя
+              <input name="name" autoComplete="name" minLength={2} maxLength={80} />
+            </label>
+          ) : null}
+          <label>
+            Email
+            <input name="email" type="email" autoComplete="email" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" autoComplete={isRegister ? "new-password" : "current-password"} minLength={8} required />
+          </label>
+          {isRegister ? (
+            <label className="check-row">
+              <input name="ageConfirmed" type="checkbox" required />
+              <span>Подтверждаю, что мне разрешено пользоваться алкогольным сервисом.</span>
+            </label>
+          ) : null}
+          {error ? <div className="form-error">{error}</div> : null}
+          <button className="primary-button" type="submit" disabled={loading}>
+            {isRegister ? <UserPlus size={18} /> : <LogIn size={18} />}
+            {loading ? "Подождите..." : isRegister ? "Зарегистрироваться" : "Войти"}
+          </button>
+        </form>
+        <div className="auth-switch">
+          {isRegister ? (
+            <Link href="/auth/signin">Уже есть аккаунт</Link>
+          ) : (
+            <Link href="/auth/register">Создать аккаунт</Link>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
