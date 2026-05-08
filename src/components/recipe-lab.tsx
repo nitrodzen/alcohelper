@@ -1,21 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, FlaskConical, Save, Sparkles } from "lucide-react";
-import type { GeneratedRecipe, InventoryItem } from "@/types/app";
+import { Check, FlaskConical, RotateCcw, Save, Sparkles } from "lucide-react";
+import { clearRecipeGeneration, loadRecipeGeneration, saveRecipeGeneration } from "@/lib/generation-storage";
+import type { GeneratedRecipe, InventoryItem, RecipeGeneration, SavedRecipe } from "@/types/app";
 
-type Generation = {
-  recipes: GeneratedRecipe[];
-  model: string;
-  inventorySnapshot: InventoryItem[];
-};
+function recipeTitleKey(title: string) {
+  return title.toLowerCase().replace(/\s+/g, " ").trim();
+}
 
 export function RecipeLab() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
-  const [generation, setGeneration] = useState<Generation | null>(null);
+  const [generation, setGeneration] = useState<RecipeGeneration | null>(null);
   const [loading, setLoading] = useState(false);
-  const [savedTitles, setSavedTitles] = useState<Set<string>>(new Set());
+  const [savedRecipeIds, setSavedRecipeIds] = useState<Set<string>>(new Set());
+  const [savedTitleKeys, setSavedTitleKeys] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState("");
+  const [prompt, setPrompt] = useState("");
 
   async function loadInventory() {
     const response = await fetch("/api/inventory", { cache: "no-store" });
@@ -23,15 +24,35 @@ export function RecipeLab() {
     setInventory(data.items ?? []);
   }
 
+  async function loadSavedRecipes() {
+    const response = await fetch("/api/recipes", { cache: "no-store" });
+    const data = await response.json();
+    const loaded: SavedRecipe[] = data.recipes ?? [];
+    setSavedRecipeIds(new Set(loaded.map((recipe) => recipe.id)));
+    setSavedTitleKeys(new Set(loaded.map((recipe) => recipeTitleKey(recipe.title))));
+  }
+
   useEffect(() => {
+    const restored = loadRecipeGeneration();
+    if (restored) {
+      setGeneration(restored);
+      setPrompt(restored.requestPrompt);
+    }
     void loadInventory();
+    void loadSavedRecipes();
   }, []);
 
   async function generate() {
     setLoading(true);
-    setMessage("");
+    setGeneration(null);
+    clearRecipeGeneration();
+    setMessage("AI ищет рецепты и проверяет доступные компоненты.");
 
-    const response = await fetch("/api/recipes/generate", { method: "POST" });
+    const response = await fetch("/api/recipes/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
     const data = await response.json();
     setLoading(false);
 
@@ -40,14 +61,36 @@ export function RecipeLab() {
       return;
     }
 
-    setGeneration(data);
-    if ((data.recipes ?? []).length === 0) {
+    const nextGeneration: RecipeGeneration = {
+      recipes: data.recipes ?? [],
+      model: data.model,
+      inventorySnapshot: data.inventorySnapshot ?? inventory,
+      sources: data.sources ?? [],
+      historyId: data.historyId,
+      requestPrompt: data.requestPrompt ?? prompt,
+    };
+
+    setGeneration(nextGeneration);
+    saveRecipeGeneration(nextGeneration);
+    setInventory(nextGeneration.inventorySnapshot);
+    if (nextGeneration.recipes.length === 0) {
       setMessage("Нужно больше данных: добавьте алкоголь, ингредиенты и инструмент.");
+    } else {
+      setMessage("");
     }
   }
 
+  function resetGeneration() {
+    clearRecipeGeneration();
+    setGeneration(null);
+    setPrompt("");
+    setMessage("");
+    void loadInventory();
+    void loadSavedRecipes();
+  }
+
   async function save(recipe: GeneratedRecipe) {
-    if (!generation) {
+    if (!generation || isSaved(recipe)) {
       return;
     }
 
@@ -58,12 +101,19 @@ export function RecipeLab() {
         recipe,
         inventorySnapshot: generation.inventorySnapshot,
         model: generation.model,
+        requestPrompt: generation.requestPrompt,
       }),
     });
 
     if (response.ok) {
-      setSavedTitles((current) => new Set([...current, recipe.title]));
+      const data = await response.json();
+      setSavedRecipeIds((current) => new Set([...current, data.recipe.id]));
+      setSavedTitleKeys((current) => new Set([...current, recipeTitleKey(recipe.title)]));
     }
+  }
+
+  function isSaved(recipe: GeneratedRecipe) {
+    return Boolean((recipe.savedRecipeId && savedRecipeIds.has(recipe.savedRecipeId)) || savedTitleKeys.has(recipeTitleKey(recipe.title)));
   }
 
   const inventoryReady = inventory.some((item) => item.kind !== "TOOL") && inventory.some((item) => item.kind === "TOOL");
@@ -73,12 +123,30 @@ export function RecipeLab() {
       <section className="recipe-hero">
         <div>
           <h1>Что можно смешать сейчас</h1>
-          <p>AI смотрит на ваш инвентарь, названия, описания и пользовательские правки. Рецепты проходят серверную проверку на отсутствующие обязательные компоненты.</p>
+          <p>AI смотрит на ваш инвентарь как есть, ищет существующие рецепты и отмечает аналоги, если оригинальных компонентов нет.</p>
         </div>
-        <button className="primary-button large" type="button" onClick={generate} disabled={loading}>
-          <Sparkles size={19} />
-          {loading ? "Подбираю..." : "Подобрать коктейли"}
-        </button>
+        <div className="prompt-box">
+          <label>
+            Комментарий к подбору
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              rows={4}
+              maxLength={1200}
+              placeholder="Например: хочу Б-52, шот, подбери аналоги из того что есть"
+            />
+          </label>
+          <div className="prompt-actions">
+            <button className="primary-button large" type="button" onClick={generate} disabled={loading}>
+              <Sparkles size={19} />
+              {loading ? "Подбираю..." : "Подобрать коктейли"}
+            </button>
+            <button className="secondary-button large" type="button" onClick={resetGeneration} disabled={loading}>
+              <RotateCcw size={18} />
+              Очистить поле для новых идей
+            </button>
+          </div>
+        </div>
       </section>
       <section className="status-strip">
         <span>{inventory.length} предметов в инвентаре</span>
@@ -98,11 +166,15 @@ export function RecipeLab() {
           <article key={recipe.title} className="recipe-card">
             <div className="recipe-card-head">
               <div>
-                <h2>{recipe.title}</h2>
+                <div className="title-row">
+                  <h2>{recipe.title}</h2>
+                  {isSaved(recipe) ? <span className="recipe-badge saved">У вас в рецептах</span> : null}
+                  {recipe.matchType === "SUBSTITUTION" ? <span className="recipe-badge substitution">С заменой</span> : null}
+                </div>
                 <p>{recipe.description}</p>
               </div>
-              <button className="icon-action" type="button" title="Сохранить рецепт" onClick={() => save(recipe)}>
-                {savedTitles.has(recipe.title) ? <Check size={19} /> : <Save size={19} />}
+              <button className="icon-action" type="button" title={isSaved(recipe) ? "Уже сохранен" : "Сохранить рецепт"} onClick={() => save(recipe)} disabled={isSaved(recipe)}>
+                {isSaved(recipe) ? <Check size={19} /> : <Save size={19} />}
               </button>
             </div>
             <div className="recipe-columns">
@@ -138,6 +210,16 @@ export function RecipeLab() {
               </ol>
             </div>
             {recipe.warnings.length ? <p className="warning-line">{recipe.warnings.join(" ")}</p> : null}
+            {recipe.sources?.length ? (
+              <div className="source-list">
+                <h3>Источники</h3>
+                {recipe.sources.slice(0, 5).map((source) => (
+                  <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
+                    {source.title ?? source.url}
+                  </a>
+                ))}
+              </div>
+            ) : null}
           </article>
         ))}
       </div>

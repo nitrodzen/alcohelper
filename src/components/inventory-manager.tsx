@@ -1,9 +1,11 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Bot, Plus, Save, Sparkles, Trash2, X } from "lucide-react";
-import { ItemIcon } from "@/components/icon";
+import { Bot, CheckCircle2, Plus, Save, Sparkles, Trash2, X } from "lucide-react";
+import { ItemIcon, selectableIcons } from "@/components/icon";
 import type { InventoryItem, InventoryKind } from "@/types/app";
+
+const units = ["мл", "л", "шт", "г", "кг", "капли", "кубики", "дольки", "ложки", "бутылка"] as const;
 
 const kindLabels: Record<InventoryKind, string> = {
   ALCOHOL: "Алкоголь",
@@ -15,12 +17,13 @@ const emptyForm = {
   kind: "ALCOHOL" as InventoryKind,
   name: "",
   category: "",
-  quantity: "",
+  quantity: "1",
   unit: "мл",
   abv: "",
   description: "",
-  icon: "Bottle",
+  icon: "BottleWine",
   aliases: "",
+  aiReviewed: false,
 };
 
 type InventoryForm = typeof emptyForm;
@@ -36,6 +39,7 @@ function toForm(item: InventoryItem): InventoryForm {
     description: item.description,
     icon: item.icon,
     aliases: item.aliases.join(", "),
+    aiReviewed: Boolean(item.aiReviewedAt),
   };
 }
 
@@ -53,6 +57,30 @@ function toPayload(form: InventoryForm) {
       .split(",")
       .map((alias) => alias.trim())
       .filter(Boolean),
+    aiReviewed: form.aiReviewed,
+  };
+}
+
+function defaultIcon(kind: InventoryKind) {
+  if (kind === "ALCOHOL") return "BottleWine";
+  if (kind === "TOOL") return "GlassWater";
+  return "Package";
+}
+
+function defaultUnit(kind: InventoryKind) {
+  if (kind === "ALCOHOL") return "мл";
+  if (kind === "TOOL") return "шт";
+  return "г";
+}
+
+function clearAIFields(form: InventoryForm): InventoryForm {
+  return {
+    ...form,
+    category: "",
+    abv: "",
+    description: "",
+    aliases: "",
+    aiReviewed: false,
   };
 }
 
@@ -107,7 +135,7 @@ export function InventoryManager() {
       return;
     }
 
-    setForm(toForm({ id: editingId ?? "draft", ...data.item }));
+    setForm(toForm({ id: editingId ?? "draft", aiReviewedAt: data.aiReviewed ? new Date().toISOString() : null, ...data.item }));
     setMessage("Предложение применено. Его можно поправить перед сохранением.");
   }
 
@@ -157,13 +185,22 @@ export function InventoryManager() {
           </div>
         </div>
         <form className="inventory-form" onSubmit={save}>
-          <div className="segmented" aria-label="Тип предмета">
+          <div className="kind-switch" aria-label="Тип предмета">
             {(Object.keys(kindLabels) as InventoryKind[]).map((kind) => (
               <button
                 key={kind}
                 type="button"
-                className={form.kind === kind ? "selected" : ""}
-                onClick={() => setForm((current) => ({ ...current, kind }))}
+                className={form.kind === kind ? "kind-option selected" : "kind-option"}
+                onClick={() =>
+                  setForm((current) =>
+                    clearAIFields({
+                      ...current,
+                      kind,
+                      icon: defaultIcon(kind),
+                      unit: defaultUnit(kind),
+                    }),
+                  )
+                }
               >
                 {kindLabels[kind]}
               </button>
@@ -172,37 +209,51 @@ export function InventoryManager() {
           <div className="form-grid">
             <label>
               Название
-              <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required maxLength={120} />
-            </label>
-            <label>
-              Категория
-              <input value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder="vodka, citrus, shaker" maxLength={80} />
+              <input value={form.name} onChange={(event) => setForm(clearAIFields({ ...form, name: event.target.value }))} required maxLength={120} />
             </label>
             <label>
               Количество
-              <input value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} type="number" min="0" step="0.01" />
+              <input value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} type="number" min="0" step="0.01" required />
             </label>
             <label>
               Ед.
-              <input value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} maxLength={32} />
-            </label>
-            <label>
-              ABV %
-              <input value={form.abv} onChange={(event) => setForm({ ...form, abv: event.target.value })} type="number" min="0" max="96" step="0.1" disabled={form.kind !== "ALCOHOL"} />
-            </label>
-            <label>
-              Иконка
-              <input value={form.icon} onChange={(event) => setForm({ ...form, icon: event.target.value })} maxLength={48} />
+              <select value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required>
+                {units.map((unit) => (
+                  <option key={unit} value={unit}>
+                    {unit}
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
-          <label>
-            Описание
-            <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} rows={4} maxLength={1200} />
-          </label>
-          <label>
-            Алиасы через запятую
-            <input value={form.aliases} onChange={(event) => setForm({ ...form, aliases: event.target.value })} placeholder="lime, лайм, green lemon" />
-          </label>
+          <div className="icon-picker" aria-label="Выбор иконки">
+            {selectableIcons.map((icon) => (
+              <button key={icon} type="button" className={form.icon === icon ? "selected" : ""} title={icon} onClick={() => setForm({ ...form, icon, aiReviewed: false })}>
+                <ItemIcon name={icon} />
+              </button>
+            ))}
+          </div>
+          <details className="optional-fields">
+            <summary>Необязательно, может заполнить AI</summary>
+            <div className="form-grid">
+              <label>
+                Категория
+                <input value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value, aiReviewed: false })} placeholder="AI заполнит сам" maxLength={80} />
+              </label>
+              <label>
+                ABV %
+                <input value={form.abv} onChange={(event) => setForm({ ...form, abv: event.target.value, aiReviewed: false })} type="number" min="0" max="96" step="0.1" disabled={form.kind !== "ALCOHOL"} />
+              </label>
+              <label>
+                Алиасы через запятую
+                <input value={form.aliases} onChange={(event) => setForm({ ...form, aliases: event.target.value, aiReviewed: false })} placeholder="lime, лайм, green lemon" />
+              </label>
+            </div>
+            <label>
+              Описание
+              <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value, aiReviewed: false })} rows={4} maxLength={1200} />
+            </label>
+          </details>
           {message ? <div className="form-note">{message}</div> : null}
           <div className="button-row">
             <button className="secondary-button" type="button" onClick={normalize} disabled={saving}>
@@ -255,6 +306,15 @@ export function InventoryManager() {
                   <small>
                     {kindLabels[item.kind]} · {item.category}
                     {item.quantity != null ? ` · ${item.quantity} ${item.unit ?? ""}` : ""}
+                  </small>
+                  <small className={item.aiReviewedAt ? "review-status ok" : "review-status"}>
+                    {item.aiReviewedAt ? (
+                      <>
+                        <CheckCircle2 size={13} /> AI проверил
+                      </>
+                    ) : (
+                      "AI заполнит при подборе"
+                    )}
                   </small>
                 </span>
               </button>

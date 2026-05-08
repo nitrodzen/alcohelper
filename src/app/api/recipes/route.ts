@@ -12,6 +12,7 @@ const saveRecipeSchema = z.object({
   recipe: generatedRecipeSchema,
   inventorySnapshot: z.array(z.unknown()).max(200),
   model: z.string().trim().min(1).max(80),
+  requestPrompt: z.string().trim().max(1200).optional().nullable(),
   userNotes: z.string().trim().max(1200).optional().nullable(),
 });
 
@@ -33,6 +34,7 @@ export async function GET() {
       ...recipe,
       createdAt: recipe.createdAt.toISOString(),
       updatedAt: recipe.updatedAt.toISOString(),
+      availabilityCheckedAt: recipe.availabilityCheckedAt?.toISOString() ?? null,
     })),
   });
 }
@@ -56,9 +58,10 @@ export async function POST(request: Request) {
       userId,
       title: parsed.data.recipe.title,
       description: parsed.data.recipe.description,
-      recipe: parsed.data.recipe as Prisma.InputJsonValue,
-      inventorySnapshot: parsed.data.inventorySnapshot as Prisma.InputJsonValue,
+      recipe: parsed.data.recipe as unknown as Prisma.InputJsonValue,
+      inventorySnapshot: parsed.data.inventorySnapshot as unknown as Prisma.InputJsonValue,
       model: parsed.data.model,
+      requestPrompt: parsed.data.requestPrompt,
       userNotes: parsed.data.userNotes,
     },
   });
@@ -69,6 +72,7 @@ export async function POST(request: Request) {
         ...saved,
         createdAt: saved.createdAt.toISOString(),
         updatedAt: saved.updatedAt.toISOString(),
+        availabilityCheckedAt: saved.availabilityCheckedAt?.toISOString() ?? null,
       },
     },
     { status: 201 },

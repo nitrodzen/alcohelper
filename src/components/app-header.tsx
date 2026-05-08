@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
-import { BookMarked, Boxes, LogOut, Martini, Sparkles } from "lucide-react";
+import { BookMarked, Boxes, Clock3, LogOut, Martini, Sparkles } from "lucide-react";
 
 const nav = [
   { href: "/", label: "Подбор", icon: Sparkles },
   { href: "/inventory", label: "Инвентарь", icon: Boxes },
   { href: "/saved", label: "Рецепты", icon: BookMarked },
+  { href: "/history", label: "История", icon: Clock3 },
 ];
 
 export function AppHeader() {

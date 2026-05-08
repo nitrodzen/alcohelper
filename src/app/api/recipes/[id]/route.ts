@@ -43,6 +43,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       ...recipe,
       createdAt: recipe.createdAt.toISOString(),
       updatedAt: recipe.updatedAt.toISOString(),
+      availabilityCheckedAt: recipe.availabilityCheckedAt?.toISOString() ?? null,
     },
   });
 }

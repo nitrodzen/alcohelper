@@ -1,13 +1,15 @@
 import { z } from "zod";
 
 export const inventoryKindSchema = z.enum(["ALCOHOL", "INGREDIENT", "TOOL"]);
+export const inventoryUnits = ["мл", "л", "шт", "г", "кг", "капли", "кубики", "дольки", "ложки", "бутылка"] as const;
+export const inventoryUnitSchema = z.enum(inventoryUnits);
 
 export const inventoryInputSchema = z.object({
   kind: inventoryKindSchema,
   name: z.string().trim().min(1).max(120),
-  category: z.string().trim().min(1).max(80),
-  quantity: z.coerce.number().min(0).max(100000).optional().nullable(),
-  unit: z.string().trim().max(32).optional().nullable(),
+  category: z.string().trim().min(1).max(80).optional().default("custom"),
+  quantity: z.coerce.number().min(0).max(100000),
+  unit: inventoryUnitSchema,
   abv: z.coerce.number().min(0).max(96).optional().nullable(),
   description: z.string().trim().max(1200).optional().default(""),
   icon: z.string().trim().max(48).optional().default("Package"),
@@ -16,15 +18,18 @@ export const inventoryInputSchema = z.object({
 
 export type InventoryInput = z.infer<typeof inventoryInputSchema>;
 
-export type InventoryForAI = InventoryInput & {
+export type InventoryForAI = Omit<InventoryInput, "quantity" | "unit"> & {
   id: string;
+  quantity: number | null;
+  unit: string | null;
+  aiReviewedAt?: string | Date | null;
 };
 
 const iconByCategory: Record<string, string> = {
-  vodka: "Bottle",
-  gin: "Bottle",
-  rum: "Bottle",
-  tequila: "Bottle",
+  vodka: "BottleWine",
+  gin: "BottleWine",
+  rum: "BottleWine",
+  tequila: "BottleWine",
   whiskey: "Wine",
   liqueur: "GlassWater",
   citrus: "Lemon",
@@ -83,19 +88,39 @@ export function heuristicNormalizeItem(input: Partial<InventoryInput>): Inventor
   }
 
   const aliases = uniqueAliases([name, ...(input.aliases ?? [])]);
-  const icon = input.icon?.trim() || iconByCategory[category] || (kind === "TOOL" ? "Wrench" : "Package");
+  const icon = input.icon?.trim() || iconByCategory[category] || defaultIconForKind(kind);
 
   return {
     kind,
     name,
     category,
-    quantity: input.quantity ?? null,
-    unit: input.unit ?? null,
+    quantity: input.quantity ?? 1,
+    unit: input.unit ?? "шт",
     abv: kind === "ALCOHOL" ? input.abv ?? null : null,
     description: input.description?.trim() ?? "",
     icon,
     aliases,
   };
+}
+
+export function defaultIconForKind(kind: "ALCOHOL" | "INGREDIENT" | "TOOL"): string {
+  if (kind === "ALCOHOL") {
+    return "BottleWine";
+  }
+  if (kind === "TOOL") {
+    return "GlassWater";
+  }
+  return "Package";
+}
+
+export function needsAIReview(item: Pick<InventoryForAI, "category" | "description" | "aliases" | "aiReviewedAt"> & { abv?: number | null }): boolean {
+  return (
+    !item.aiReviewedAt ||
+    !item.category ||
+    item.category === "custom" ||
+    !item.description ||
+    item.aliases.length === 0
+  );
 }
 
 export function itemSearchTerms(item: Pick<InventoryForAI, "name" | "category" | "description" | "aliases">): string[] {

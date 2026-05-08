@@ -2,6 +2,7 @@ import { hash } from "bcryptjs";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { seedInitialInventoryForUser } from "@/lib/seed";
 
 export const runtime = "nodejs";
 
@@ -38,6 +39,8 @@ export async function POST(request: Request) {
       name: true,
     },
   });
+
+  await seedInitialInventoryForUser(user.id);
 
   return NextResponse.json({ user }, { status: 201 });
 }

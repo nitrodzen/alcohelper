@@ -30,7 +30,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Нужно хотя бы название предмета." }, { status: 400 });
   }
 
-  const item = await normalizeInventoryWithAI(parsed.data);
+  const result = await normalizeInventoryWithAI(parsed.data);
 
-  return NextResponse.json({ item });
+  if (!result.aiReviewed) {
+    return NextResponse.json({ error: "AI не смог надежно заполнить предмет. Попробуйте уточнить название." }, { status: 422 });
+  }
+
+  return NextResponse.json(result);
 }
