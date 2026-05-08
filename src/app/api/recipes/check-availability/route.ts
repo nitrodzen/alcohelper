@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { authOptions, getSessionUserId } from "@/lib/auth";
+import { buildAvailabilityInventorySnapshot, isAvailabilityInventorySnapshotStale } from "@/lib/availability-freshness";
 import { checkSavedRecipesAvailability, type SavedRecipeForAI } from "@/lib/ai";
 import type { InventoryForAI } from "@/lib/inventory";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -46,6 +47,19 @@ export async function POST() {
     aliases: item.aliases,
     aiReviewedAt: item.aiReviewedAt,
   }));
+  const availabilityInventorySnapshot = buildAvailabilityInventorySnapshot(
+    items.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      name: item.name,
+      category: item.category,
+      quantity: item.quantity === null ? null : Number(item.quantity),
+      unit: item.unit,
+      abv: item.abv === null ? null : Number(item.abv),
+      description: item.description,
+      aliases: item.aliases,
+    })),
+  );
 
   const savedRecipes: SavedRecipeForAI[] = savedRecipeRows.flatMap((saved) => {
     const parsedRecipe = generatedRecipeSchema.safeParse(saved.recipe);
@@ -83,7 +97,7 @@ export async function POST() {
           availabilityComment: check.comment,
           availabilityDetails: check as unknown as Prisma.InputJsonValue,
           availabilityCheckedAt: checkedAt,
-          availabilityInventorySnapshot: inventory as unknown as Prisma.InputJsonValue,
+          availabilityInventorySnapshot: availabilityInventorySnapshot as unknown as Prisma.InputJsonValue,
           availabilityModel: result.model,
         },
       }),
@@ -102,6 +116,9 @@ export async function POST() {
       createdAt: recipe.createdAt.toISOString(),
       updatedAt: recipe.updatedAt.toISOString(),
       availabilityCheckedAt: recipe.availabilityCheckedAt?.toISOString() ?? null,
+      availabilityIsStale: Boolean(
+        recipe.availabilityCheckedAt && isAvailabilityInventorySnapshotStale(recipe.availabilityInventorySnapshot, availabilityInventorySnapshot),
+      ),
     })),
   });
 }

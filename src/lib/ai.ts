@@ -131,7 +131,7 @@ export type AvailabilityAIResult = {
   status: "SUCCESS" | "FAILED";
   error?: string;
 };
-type RecipeGenerationOptions = {
+export type RecipeGenerationOptions = {
   excludeTitles?: string[];
   needMoreNewRecipes?: boolean;
   savedRecipeLimitReached?: boolean;
@@ -488,38 +488,36 @@ export async function normalizeInventoryBatchWithAI(inventory: InventoryForAI[])
   }
 }
 
-export function buildRecipeGenerationInstructions(retry = false): string {
+export function buildRecipeGenerationInstructions(options: RecipeGenerationOptions | boolean = {}): string {
+  const resolvedOptions: RecipeGenerationOptions = typeof options === "boolean" ? { needMoreNewRecipes: options } : options;
   const instructions = [
-    "Ты профессиональный бармен для закрытого портала.",
-    "Не изобретай авторские коктейли с нуля и не выдавай выдумку за классический рецепт.",
-    "Используй web search, чтобы найти существующие рецепты, созданные людьми, и прикладывай источники в recipe.sources.",
-    "Если пользователь просит конкретный коктейль, сначала найди оригинальный рецепт.",
-    "Если пользователь не дал конкретный запрос, сам активно ищи подходящие известные коктейли по inventory: шоты, хайболы, сауэры, лонг-дринки, спритцы и простые миксы.",
-    "Сначала предложи exact-варианты из имеющихся компонентов, затем near-match варианты с заменами только из inventory.",
-    "Учитывай savedRecipes как контекст и максимум 2 кандидата, а не как основную выдачу.",
-    "Если сохраненный рецепт можно сделать сейчас, верни его с savedRecipeId и matchType SAVED, но после этого ищи новые известные варианты.",
-    "Если сохраненный рецепт можно сделать только с заменой из inventory, верни savedRecipeId, matchType SUBSTITUTION и явно опиши замену.",
-    "Генерируй только варианты, которые можно сделать из инвентаря пользователя прямо сейчас.",
-    "Все обязательные ингредиенты и инструменты в ответе должны быть предметами из inventory; не предлагай докупить или использовать то, чего нет.",
-    "Если оригинальный компонент отсутствует, можно предложить аналог только когда похожий компонент уже есть в inventory; явно укажи замену в description или warnings.",
-    "Если нет ни оригинального ингредиента, ни подходящего аналога в inventory, не предлагай такой коктейль.",
-    "Не добавляй лед, содовую, сахар, соки, гарнир или инструменты, если их нет в инвентаре.",
-    "Если источников нет, рецепт можно показывать только как адаптацию/аналог, а не как классический рецепт.",
-    "Верни до 10 сильных вариантов; не добивай список слабыми или невозможными рецептами.",
-    "Верни только валидный JSON без markdown по схеме: {\"recipes\":[{\"title\":\"\",\"description\":\"\",\"savedRecipeId\":null,\"matchType\":\"EXACT\",\"ingredients\":[{\"name\":\"\",\"amount\":\"\",\"inventoryItemId\":\"\",\"optional\":false}],\"tools\":[{\"name\":\"\",\"optional\":false}],\"steps\":[\"\"],\"warnings\":[\"\"],\"sources\":[{\"url\":\"\",\"title\":\"\"}]}]}.",
-    "Для каждого ingredient.name используй название из инвентаря, если возможно.",
+    "Ты профессиональный шеф-бармен закрытого портала. Твоя задача - подбирать классические и известные коктейли строго на основе доступного inventory пользователя.",
+
+    "### SEARCH & SOURCING (ПОИСК И ИСТОЧНИКИ)\n- Используй web search для поиска существующих, признанных рецептов, созданных людьми.\n- Прикладывай валидные ссылки на источники в recipe.sources.\n- Если источников для классического рецепта нет, помечай рецепт как адаптацию/аналог в description или warnings.",
+
+    "### MATCHING STRATEGY (СТРАТЕГИЯ ПОДБОРА)\n- Сначала генерируй EXACT-match: рецепты, которые можно собрать без замен.\n- Затем SUBSTITUTION-match: рецепты с заменами, но только на предметы, которые есть в inventory.\n- Если пользователь не дал конкретный запрос, активно предлагай известные варианты по категориям: шоты, хайболы, сауэры, лонг-дринки, спритцы и простые миксы.\n- Учитывай savedRecipes как контекст и максимум 2 кандидата, а не как основную выдачу.\n- Если сохраненный рецепт можно сделать сейчас, верни его с savedRecipeId и matchType SAVED, затем продолжай искать новые известные варианты.\n- Если сохраненный рецепт можно сделать только с заменой из inventory, верни savedRecipeId, matchType SUBSTITUTION и явно опиши замену.",
+
+    "### INVENTORY CONSTRAINTS (СТРОГИЕ ОГРАНИЧЕНИЯ ИНВЕНТАРЯ)\n- Генерируй только варианты, которые можно приготовить прямо сейчас из текущего inventory.\n- Все обязательные ингредиенты и инструменты в ответе должны присутствовать в inventory.\n- Лед, содовую, сахар, соки, гарнир и инструменты используй только когда такие предметы явно есть в inventory.\n- Если оригинальный компонент отсутствует, замена возможна только на существующий в inventory аналог; явно укажи замену в description или warnings.\n- Если нет ни оригинального компонента, ни подходящего аналога в inventory, рецепт отбрасывается.\n- Не предлагай докупить ингредиенты.",
+
+    "### OUTPUT FORMAT (ФОРМАТ ВЫВОДА)\n- Верни до 10 сильных вариантов; не добивай список слабыми или невозможными рецептами.\n- Для каждого ingredient.name строго используй точное название name из inventory, если этот ингредиент обязателен.\n- Верни только валидный JSON без markdown по схеме: {\"recipes\":[{\"title\":\"\",\"description\":\"\",\"savedRecipeId\":null,\"matchType\":\"EXACT\",\"ingredients\":[{\"name\":\"\",\"amount\":\"\",\"inventoryItemId\":\"\",\"optional\":false}],\"tools\":[{\"name\":\"\",\"optional\":false}],\"steps\":[\"\"],\"warnings\":[\"\"],\"sources\":[{\"url\":\"\",\"title\":\"\"}]}]}.",
   ];
 
-  if (retry) {
+  if (resolvedOptions.needMoreNewRecipes) {
     instructions.push(
-      "Это retry-добор: возвращай только новые feasible варианты.",
-      "Не возвращай рецепты из excludeTitles и не возвращай savedRecipes как кандидатов.",
-      "Если savedRecipeLimitReached=true, savedRecipeId должен быть null для всех новых рецептов.",
-      "Используй targetNewRecipes как желаемое количество новых вариантов, но не придумывай невозможные рецепты.",
+      [
+        "### RETRY LOGIC (ЛОГИКА ДОБОРА)",
+        "- Это повторный вызов для добора вариантов. Возвращай только новые осуществимые рецепты.",
+        "- Исключи рецепты из списка excludeTitles.",
+        "- Не возвращай savedRecipes как кандидатов.",
+        resolvedOptions.savedRecipeLimitReached ? "- Установи savedRecipeId = null для всех новых рецептов." : "",
+        resolvedOptions.targetNewRecipes ? `- Сгенерируй до ${resolvedOptions.targetNewRecipes} новых вариантов, если это физически возможно из inventory.` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
     );
   }
 
-  return instructions.join(" ");
+  return instructions.filter(Boolean).join("\n\n");
 }
 
 export function buildRecipeGenerationPayload(
@@ -541,15 +539,14 @@ export function buildRecipeGenerationPayload(
 
 export function buildAvailabilityCheckInstructions(): string {
   return [
-    "Ты проверяешь сохраненные рецепты домашнего бара против текущего inventory.",
-    "Не меняй рецепты и не предлагай докупить ингредиенты.",
-    "Статус AVAILABLE ставь только когда все обязательные ингредиенты и инструменты есть в inventory.",
-    "Статус AVAILABLE_WITH_SUBSTITUTIONS ставь только когда отсутствующий оригинальный компонент можно заменить похожим компонентом из inventory.",
-    "Статус MISSING ставь, если нет оригинального компонента и нет подходящей замены из inventory.",
-    "Для каждой замены укажи original и substitute; substitute должен быть названием из inventory.",
-    "Верни строго один check на каждый recipeId из входа.",
-    "Верни только валидный JSON без markdown по схеме: {\"checks\":[{\"recipeId\":\"\",\"status\":\"AVAILABLE\",\"comment\":\"\",\"missingIngredients\":[\"\"],\"substitutions\":[{\"original\":\"\",\"substitute\":\"\",\"note\":\"\"}],\"warnings\":[\"\"],\"sources\":[{\"url\":\"\",\"title\":\"\"}]}]}.",
-  ].join(" ");
+    "Ты система валидации рецептов. Твоя задача - проверить сохраненные рецепты на соответствие текущему inventory домашнего бара.",
+
+    "### DECISION MATRIX (МАТРИЦА СТАТУСОВ)\n- AVAILABLE: назначается, когда все обязательные ингредиенты и инструменты присутствуют в inventory.\n- AVAILABLE_WITH_SUBSTITUTIONS: назначается, когда отсутствует оригинальный компонент, но в inventory есть логичная и подходящая замена.\n- MISSING: назначается, когда отсутствует обязательный компонент и в inventory нет подходящей замены.",
+
+    "### CONSTRAINTS (ОГРАНИЧЕНИЯ)\n- Верни строго один check на каждый recipeId из входящих данных.\n- Проверяй рецепт как есть: не меняй исходный рецепт и не предлагай покупку недостающих ингредиентов.\n- Для каждой замены укажи original и substitute.\n- Поле substitute должно содержать строго точное название name предмета из текущего inventory.",
+
+    "### OUTPUT FORMAT (ФОРМАТ ВЫВОДА)\n- Верни только валидный JSON без markdown по схеме: {\"checks\":[{\"recipeId\":\"\",\"status\":\"AVAILABLE\",\"comment\":\"\",\"missingIngredients\":[\"\"],\"substitutions\":[{\"original\":\"\",\"substitute\":\"\",\"note\":\"\"}],\"warnings\":[\"\"],\"sources\":[{\"url\":\"\",\"title\":\"\"}]}]}.",
+  ].join("\n\n");
 }
 
 export function buildAvailabilityCheckPayload(inventory: InventoryForAI[], savedRecipes: SavedRecipeForAI[]) {
@@ -660,7 +657,7 @@ async function requestGeneratedRecipes(
     input: [
       {
         role: "system",
-        content: buildRecipeGenerationInstructions(Boolean(options.needMoreNewRecipes)),
+        content: buildRecipeGenerationInstructions(options),
       },
       {
         role: "user",

@@ -696,6 +696,27 @@ select {
   font-weight: 800;
 }
 
+.availability-meta {
+  align-items: flex-end;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  text-align: right;
+}
+
+.freshness-badge {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.74rem;
+  font-weight: 900;
+  padding: 5px 8px;
+}
+
+.freshness-badge.stale {
+  background: var(--warm-soft);
+  color: #803d25;
+}
+
 .mini-list {
   display: flex;
   flex-wrap: wrap;

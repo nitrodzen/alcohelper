@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { authOptions, getSessionUserId } from "@/lib/auth";
+import { buildAvailabilityInventorySnapshot, isAvailabilityInventorySnapshotStale } from "@/lib/availability-freshness";
 import { generatedRecipeSchema } from "@/lib/recipe";
 import { prisma } from "@/lib/prisma";
 
@@ -24,10 +25,29 @@ export async function GET() {
     return NextResponse.json({ error: "Нужна авторизация." }, { status: 401 });
   }
 
-  const recipes = await prisma.savedRecipe.findMany({
-    where: { userId },
-    orderBy: { createdAt: "desc" },
-  });
+  const [recipes, items] = await Promise.all([
+    prisma.savedRecipe.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.inventoryItem.findMany({
+      where: { userId },
+      orderBy: [{ kind: "asc" }, { name: "asc" }],
+    }),
+  ]);
+  const currentAvailabilitySnapshot = buildAvailabilityInventorySnapshot(
+    items.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      name: item.name,
+      category: item.category,
+      quantity: item.quantity === null ? null : Number(item.quantity),
+      unit: item.unit,
+      abv: item.abv === null ? null : Number(item.abv),
+      description: item.description,
+      aliases: item.aliases,
+    })),
+  );
 
   return NextResponse.json({
     recipes: recipes.map((recipe) => ({
@@ -35,6 +55,9 @@ export async function GET() {
       createdAt: recipe.createdAt.toISOString(),
       updatedAt: recipe.updatedAt.toISOString(),
       availabilityCheckedAt: recipe.availabilityCheckedAt?.toISOString() ?? null,
+      availabilityIsStale: Boolean(
+        recipe.availabilityCheckedAt && isAvailabilityInventorySnapshotStale(recipe.availabilityInventorySnapshot, currentAvailabilitySnapshot),
+      ),
     })),
   });
 }
@@ -73,6 +96,7 @@ export async function POST(request: Request) {
         createdAt: saved.createdAt.toISOString(),
         updatedAt: saved.updatedAt.toISOString(),
         availabilityCheckedAt: saved.availabilityCheckedAt?.toISOString() ?? null,
+        availabilityIsStale: false,
       },
     },
     { status: 201 },

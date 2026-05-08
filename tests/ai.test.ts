@@ -127,21 +127,43 @@ describe("recipe generation prompt helpers", () => {
   it("tells the model to use sources and not invent recipes", () => {
     const instructions = buildRecipeGenerationInstructions();
 
-    expect(instructions).toContain("Не изобретай");
+    expect(instructions).toContain("### SEARCH & SOURCING");
+    expect(instructions).toContain("### MATCHING STRATEGY");
+    expect(instructions).toContain("### INVENTORY CONSTRAINTS");
+    expect(instructions).toContain("### OUTPUT FORMAT");
     expect(instructions).toContain("web search");
-    expect(instructions).toContain("источники");
+    expect(instructions).toContain("recipe.sources");
     expect(instructions).toContain("адаптацию/аналог");
-    expect(instructions).toContain("не предлагай такой коктейль");
+    expect(instructions).toContain("рецепт отбрасывается");
     expect(instructions).toContain("savedRecipes");
     expect(instructions).toContain("до 10");
+    expect(instructions).toContain("\n\n###");
+  });
+
+  it("adds retry instructions with concrete retry options", () => {
+    const instructions = buildRecipeGenerationInstructions({
+      needMoreNewRecipes: true,
+      excludeTitles: ["B-52"],
+      savedRecipeLimitReached: true,
+      targetNewRecipes: 6,
+    });
+
+    expect(instructions).toContain("### RETRY LOGIC");
+    expect(instructions).toContain("excludeTitles");
+    expect(instructions).toContain("Не возвращай savedRecipes");
+    expect(instructions).toContain("savedRecipeId = null");
+    expect(instructions).toContain("до 6");
   });
 
   it("builds strict availability check instructions", () => {
     const instructions = buildAvailabilityCheckInstructions();
 
+    expect(instructions).toContain("### DECISION MATRIX");
+    expect(instructions).toContain("### CONSTRAINTS");
     expect(instructions).toContain("recipeId");
     expect(instructions).toContain("AVAILABLE_WITH_SUBSTITUTIONS");
-    expect(instructions).toContain("Статус MISSING");
+    expect(instructions).toContain("MISSING");
+    expect(instructions).toContain("Поле substitute");
   });
 
   it("limits saved recipes to two and keeps new recipes in the generated list", () => {

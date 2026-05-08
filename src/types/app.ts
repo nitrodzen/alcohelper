@@ -70,6 +70,7 @@ export type SavedRecipe = {
   availabilityComment: string | null;
   availabilityDetails: AvailabilityDetails | null;
   availabilityCheckedAt: string | null;
+  availabilityIsStale: boolean;
   availabilityInventorySnapshot: unknown;
   availabilityModel: string | null;
   createdAt: string;

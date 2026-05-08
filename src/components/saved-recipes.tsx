@@ -108,9 +108,11 @@ export function SavedRecipes() {
               <div className={`availability-panel ${saved.availabilityStatus.toLowerCase()}`}>
                 <div className="availability-head">
                   <strong>{availabilityLabels[saved.availabilityStatus]}</strong>
-                  {saved.availabilityCheckedAt ? <span>{new Date(saved.availabilityCheckedAt).toLocaleString("ru-RU")}</span> : null}
+                  <div className="availability-meta">
+                    {saved.availabilityCheckedAt ? <span>Актуально на: {new Date(saved.availabilityCheckedAt).toLocaleString("ru-RU")}</span> : null}
+                    {saved.availabilityIsStale ? <span className="freshness-badge stale">Инвентарь изменился, проверка может быть неактуальна</span> : null}
+                  </div>
                 </div>
-                {saved.availabilityComment ? <p>{saved.availabilityComment}</p> : null}
                 {saved.availabilityDetails?.substitutions.length ? (
                   <div className="mini-list">
                     <h3>Замены</h3>
