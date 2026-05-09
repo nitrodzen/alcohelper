@@ -319,6 +319,33 @@ function attachSavedRecipeMetadata(recipes: GeneratedRecipe[], savedRecipes: Sav
   });
 }
 
+function hasInfeasibleRecipeMarker(recipe: GeneratedRecipe): boolean {
+  const text = normalizeText(
+    [
+      recipe.title,
+      recipe.description,
+      ...recipe.warnings,
+      ...recipe.steps,
+    ].join(" "),
+  );
+  const markers = [
+    "рецепт отбрасывается",
+    "вариант отбрасывается",
+    "невозможно собрать",
+    "невозможно приготовить",
+    "нельзя приготовить",
+    "нет ингредиентов",
+    "не хватает ингредиентов",
+    "отсутствует обязательный",
+    "нет подходящей замены",
+    "cannot be made",
+    "not feasible",
+    "missing required",
+  ];
+
+  return markers.some((marker) => text.includes(normalizeText(marker)));
+}
+
 export function postProcessGeneratedRecipes(
   recipes: GeneratedRecipe[],
   inventory: InventoryForAI[],
@@ -333,7 +360,8 @@ export function postProcessGeneratedRecipes(
       sources: cleanSources.length ? cleanSources : sanitizedFallbackSources,
     };
   });
-  const available = attachSavedRecipeMetadata(filterRecipesByInventory(recipesWithCleanSources, inventory), savedRecipes);
+  const available = attachSavedRecipeMetadata(filterRecipesByInventory(recipesWithCleanSources, inventory), savedRecipes)
+    .filter((recipe) => !hasInfeasibleRecipeMarker(recipe));
   const deduped = dedupeRecipesByTitle(available);
   const saved = deduped.filter((recipe) => recipe.savedRecipeId).slice(0, maxSavedRecipesInGeneration);
   const fresh = deduped.filter((recipe) => !recipe.savedRecipeId);
@@ -493,11 +521,13 @@ export function buildRecipeGenerationInstructions(options: RecipeGenerationOptio
   const instructions = [
     "Ты профессиональный шеф-бармен закрытого портала. Твоя задача - подбирать классические и известные коктейли строго на основе доступного inventory пользователя.",
 
-    "### SEARCH & SOURCING (ПОИСК И ИСТОЧНИКИ)\n- Используй web search для поиска существующих, признанных рецептов, созданных людьми.\n- Прикладывай валидные ссылки на источники в recipe.sources.\n- Если источников для классического рецепта нет, помечай рецепт как адаптацию/аналог в description или warnings.",
+    "### SEARCH & SOURCING (ПОИСК И ИСТОЧНИКИ)\n- Используй web search для поиска существующих, признанных рецептов, созданных людьми.\n- Приоритетные источники: https://www.diffordsguide.com/, https://www.liquor.com/, https://punchdrink.com/, https://imbibemagazine.com/, https://iba-world.com/, https://tuxedono2.com/.\n- Прикладывай валидные ссылки на источники в recipe.sources.\n- Если источников для классического рецепта нет, помечай рецепт как адаптацию/аналог в description или warnings.",
 
     "### MATCHING STRATEGY (СТРАТЕГИЯ ПОДБОРА)\n- Сначала генерируй EXACT-match: рецепты, которые можно собрать без замен.\n- Затем SUBSTITUTION-match: рецепты с заменами, но только на предметы, которые есть в inventory.\n- Если пользователь не дал конкретный запрос, активно предлагай известные варианты по категориям: шоты, хайболы, сауэры, лонг-дринки, спритцы и простые миксы.\n- Учитывай savedRecipes как контекст и максимум 2 кандидата, а не как основную выдачу.\n- Если сохраненный рецепт можно сделать сейчас, верни его с savedRecipeId и matchType SAVED, затем продолжай искать новые известные варианты.\n- Если сохраненный рецепт можно сделать только с заменой из inventory, верни savedRecipeId, matchType SUBSTITUTION и явно опиши замену.",
 
-    "### INVENTORY CONSTRAINTS (СТРОГИЕ ОГРАНИЧЕНИЯ ИНВЕНТАРЯ)\n- Генерируй только варианты, которые можно приготовить прямо сейчас из текущего inventory.\n- Все обязательные ингредиенты и инструменты в ответе должны присутствовать в inventory.\n- Лед, содовую, сахар, соки, гарнир и инструменты используй только когда такие предметы явно есть в inventory.\n- Если оригинальный компонент отсутствует, замена возможна только на существующий в inventory аналог; явно укажи замену в description или warnings.\n- Если нет ни оригинального компонента, ни подходящего аналога в inventory, рецепт отбрасывается.\n- Не предлагай докупить ингредиенты.",
+    "### SUBSTITUTION QUALITY (КАЧЕСТВО ЗАМЕН)\n- Хорошая замена сохраняет роль компонента в коктейле: базовый алкоголь близкой семьи, ликер похожего вкусового профиля, цитрус на цитрус, сироп на близкий сироп.\n- Допустимые примеры: белый ром заменить имеющимся темным ромом; кофейный ликер заменить имеющимся шоколадным сливочным ликером, если это сохраняет десертный профиль.\n- Слабые или случайные замены не подходят. Не заменяй ключевой вкус несвязанным предметом только ради заполнения списка.\n- В description или warnings кратко объясняй каждую замену и ее влияние на вкус.",
+
+    "### INVENTORY CONSTRAINTS (СТРОГИЕ ОГРАНИЧЕНИЯ ИНВЕНТАРЯ)\n- Возвращай только варианты, которые можно приготовить прямо сейчас из текущего inventory.\n- Все обязательные ингредиенты и инструменты в ответе должны присутствовать в inventory.\n- Лед, содовую, сахар, соки, гарнир и инструменты используй только когда такие предметы явно есть в inventory.\n- Если оригинальный компонент отсутствует, замена возможна только на существующий в inventory аналог; явно укажи замену в description или warnings.\n- Если для рецепта нет оригинального компонента и нет качественного аналога в inventory, просто пропусти этот рецепт и не добавляй его в recipes.\n- Не добавляй в ответ карточки с фразами вроде \"рецепт отбрасывается\", \"невозможно приготовить\", \"не хватает ингредиентов\".\n- Не предлагай докупить ингредиенты.",
 
     "### OUTPUT FORMAT (ФОРМАТ ВЫВОДА)\n- Верни до 10 сильных вариантов; не добивай список слабыми или невозможными рецептами.\n- Для каждого ingredient.name строго используй точное название name из inventory, если этот ингредиент обязателен.\n- Верни только валидный JSON без markdown по схеме: {\"recipes\":[{\"title\":\"\",\"description\":\"\",\"savedRecipeId\":null,\"matchType\":\"EXACT\",\"ingredients\":[{\"name\":\"\",\"amount\":\"\",\"inventoryItemId\":\"\",\"optional\":false}],\"tools\":[{\"name\":\"\",\"optional\":false}],\"steps\":[\"\"],\"warnings\":[\"\"],\"sources\":[{\"url\":\"\",\"title\":\"\"}]}]}.",
   ];

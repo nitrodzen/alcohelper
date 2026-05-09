@@ -129,12 +129,17 @@ describe("recipe generation prompt helpers", () => {
 
     expect(instructions).toContain("### SEARCH & SOURCING");
     expect(instructions).toContain("### MATCHING STRATEGY");
+    expect(instructions).toContain("### SUBSTITUTION QUALITY");
     expect(instructions).toContain("### INVENTORY CONSTRAINTS");
     expect(instructions).toContain("### OUTPUT FORMAT");
     expect(instructions).toContain("web search");
+    expect(instructions).toContain("diffordsguide.com");
+    expect(instructions).toContain("liquor.com");
+    expect(instructions).toContain("tuxedono2.com");
     expect(instructions).toContain("recipe.sources");
     expect(instructions).toContain("адаптацию/аналог");
-    expect(instructions).toContain("рецепт отбрасывается");
+    expect(instructions).toContain("просто пропусти этот рецепт");
+    expect(instructions).toContain("Слабые или случайные замены не подходят");
     expect(instructions).toContain("savedRecipes");
     expect(instructions).toContain("до 10");
     expect(instructions).toContain("\n\n###");
@@ -195,5 +200,20 @@ describe("recipe generation prompt helpers", () => {
     expect(processed).toHaveLength(10);
     expect(processed.filter((item) => item.title === "Fresh 0")).toHaveLength(1);
     expect(processed[0].sources).toEqual([{ url: "https://example.com/recipe" }]);
+  });
+
+  it("drops recipes where the model returned an infeasible service message", () => {
+    const processed = postProcessGeneratedRecipes(
+      [
+        recipe("Impossible", {
+          description: "Этот рецепт отбрасывается. Нет подходящей замены в инвентаре.",
+        }),
+        recipe("Possible"),
+      ],
+      [martiniWithBadAutofields],
+      [],
+    );
+
+    expect(processed.map((item) => item.title)).toEqual(["Possible"]);
   });
 });
