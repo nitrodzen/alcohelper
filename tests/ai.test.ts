@@ -136,6 +136,8 @@ describe("recipe generation prompt helpers", () => {
     expect(instructions).toContain("diffordsguide.com");
     expect(instructions).toContain("liquor.com");
     expect(instructions).toContain("tuxedono2.com");
+    expect(instructions).toContain("ru.inshaker.com");
+    expect(instructions).toContain("scienceofdrinks.com");
     expect(instructions).toContain("recipe.sources");
     expect(instructions).toContain("адаптацию/аналог");
     expect(instructions).toContain("просто пропусти этот рецепт");
