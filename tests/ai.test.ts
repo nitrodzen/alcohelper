@@ -38,6 +38,18 @@ function recipe(title: string, extra: Partial<GeneratedRecipe> = {}): GeneratedR
   };
 }
 
+function html(title: string, ingredients: string): string {
+  return `<html><head><title>${title}</title><meta name="description" content="${ingredients}"></head><body><h1>${title}</h1><p>${ingredients}</p><p>This trusted recipe page has enough visible recipe content for validation.</p></body></html>`;
+}
+
+const validSourceValidator = async () => ({
+  verdict: "VALID_EXACT" as const,
+  reason: "Source title and ingredients match.",
+  matchedRecipeTitle: "Matched",
+  matchedIngredients: ["Martini Fiero"],
+  substitutions: [],
+});
+
 describe("AI normalization helpers", () => {
   it("requires useful category and description before an item is considered reviewed", () => {
     expect(isValidNormalizedInventoryUpdate(null)).toBe(false);
@@ -114,15 +126,19 @@ describe("recipe generation prompt helpers", () => {
     const retryPayload = buildRecipeGenerationPayload([martiniWithBadAutofields], "", [], {
       excludeTitles: ["B-52"],
       needMoreNewRecipes: true,
+      needMoreSubstitutionRecipes: true,
       savedRecipeLimitReached: true,
       targetNewRecipes: 6,
     });
     expect(retryPayload).toMatchObject({
       excludeTitles: ["B-52"],
       needMoreNewRecipes: true,
+      needMoreSubstitutionRecipes: true,
       savedRecipeLimitReached: true,
       targetNewRecipes: 6,
     });
+    const substitutionPayload = buildRecipeGenerationPayload([{ ...martiniWithBadAutofields, name: "Dark rum", category: "rum", aliases: ["dark rum"] }]);
+    expect(substitutionPayload.substitutionHints).toContainEqual({ originalRole: "rum", availableSubstitutes: ["Dark rum"] });
   });
 
   it("tells the model to use sources and not invent recipes", () => {
@@ -153,6 +169,7 @@ describe("recipe generation prompt helpers", () => {
   it("adds retry instructions with concrete retry options", () => {
     const instructions = buildRecipeGenerationInstructions({
       needMoreNewRecipes: true,
+      needMoreSubstitutionRecipes: true,
       excludeTitles: ["B-52"],
       savedRecipeLimitReached: true,
       targetNewRecipes: 6,
@@ -161,6 +178,7 @@ describe("recipe generation prompt helpers", () => {
     expect(instructions).toContain("### RETRY LOGIC");
     expect(instructions).toContain("excludeTitles");
     expect(instructions).toContain("Не возвращай savedRecipes");
+    expect(instructions).toContain("substitutionHints");
     expect(instructions).toContain("savedRecipeId = null");
     expect(instructions).toContain("до 6");
   });
@@ -222,13 +240,13 @@ describe("recipe generation prompt helpers", () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       if (url.includes("ok")) {
-        return new Response("", { status: 200 });
+        return new Response(html("OK", "Martini Fiero"), { status: 200 });
       }
       if (url.includes("redirect")) {
-        return new Response("", { status: 301 });
+        return new Response(html("Redirect", "Martini Fiero"), { status: 301 });
       }
       if (url.includes("head-blocked")) {
-        return new Response("", { status: init?.method === "HEAD" ? 405 : 200 });
+        return new Response(init?.method === "HEAD" ? "" : html("Head blocked", "Martini Fiero"), { status: init?.method === "HEAD" ? 405 : 200 });
       }
       if (url.includes("network")) {
         throw new Error("network");
@@ -238,30 +256,99 @@ describe("recipe generation prompt helpers", () => {
 
     const verified = await verifyGeneratedRecipeSources(
       [
-        recipe("OK", { sources: [{ url: "https://example.com/ok" }, { url: "https://example.com/missing" }] }),
-        recipe("Redirect", { sources: [{ url: "https://example.com/redirect" }] }),
-        recipe("Head blocked", { sources: [{ url: "https://example.com/head-blocked" }] }),
-        recipe("Missing", { sources: [{ url: "https://example.com/missing" }] }),
-        recipe("Network", { sources: [{ url: "https://example.com/network" }] }),
+        recipe("OK", { sources: [{ url: "https://www.diffordsguide.com/ok" }, { url: "https://www.diffordsguide.com/missing" }] }),
+        recipe("Redirect", { sources: [{ url: "https://www.diffordsguide.com/redirect" }] }),
+        recipe("Head blocked", { sources: [{ url: "https://www.diffordsguide.com/head-blocked" }] }),
+        recipe("Missing", { sources: [{ url: "https://www.diffordsguide.com/missing" }] }),
+        recipe("Network", { sources: [{ url: "https://www.diffordsguide.com/network" }] }),
         recipe("No source"),
       ],
-      [],
-      fetchImpl,
+      { fetchImpl, validator: validSourceValidator },
     );
 
     expect(verified.map((item) => item.title)).toEqual(["OK", "Redirect", "Head blocked"]);
-    expect(verified[0].sources).toEqual([{ url: "https://example.com/ok" }]);
+    expect(verified[0].sources).toEqual([{ url: "https://www.diffordsguide.com/ok" }]);
   });
 
   it("uses verified fallback sources only for a single recipe without own sources", async () => {
-    const fetchImpl: typeof fetch = async () => new Response("", { status: 200 });
+    const fetchImpl: typeof fetch = async () => new Response(html("Single", "Martini Fiero"), { status: 200 });
 
-    const single = await verifyGeneratedRecipeSources([recipe("Single")], [{ url: "https://example.com/fallback" }], fetchImpl);
-    const multiple = await verifyGeneratedRecipeSources([recipe("First"), recipe("Second")], [{ url: "https://example.com/fallback" }], fetchImpl);
+    const single = await verifyGeneratedRecipeSources([recipe("Single")], {
+      fallbackSources: [{ url: "https://www.diffordsguide.com/fallback" }],
+      fetchImpl,
+      validator: validSourceValidator,
+    });
+    const multiple = await verifyGeneratedRecipeSources([recipe("First"), recipe("Second")], {
+      fallbackSources: [{ url: "https://www.diffordsguide.com/fallback" }],
+      fetchImpl,
+      validator: validSourceValidator,
+    });
 
     expect(single).toHaveLength(1);
-    expect(single[0].sources).toEqual([{ url: "https://example.com/fallback" }]);
+    expect(single[0].sources).toEqual([{ url: "https://www.diffordsguide.com/fallback" }]);
     expect(multiple).toEqual([]);
+  });
+
+  it("rejects sources outside the trusted recipe domains", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(html("OK", "Martini Fiero"), { status: 200 });
+    const verified = await verifyGeneratedRecipeSources(
+      [recipe("OK", { sources: [{ url: "https://example.com/ok" }] })],
+      { fetchImpl, validator: validSourceValidator },
+    );
+
+    expect(verified).toEqual([]);
+  });
+
+  it("rejects a trusted source page when it describes another cocktail", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(html("Z Martini", "75 ml Ketel One Vodka 37.5 ml Cockburn's Tawny Port"), { status: 200 });
+    const validator = async ({ recipe: checkedRecipe, sourceContent }: { recipe: GeneratedRecipe; sourceContent: string }) => ({
+      verdict: checkedRecipe.title === "Vodka & Cola" && sourceContent.includes("Z Martini") ? "INVALID_SOURCE_MISMATCH" as const : "VALID_EXACT" as const,
+      reason: "Source page is for a different cocktail.",
+      matchedRecipeTitle: "Z Martini",
+      matchedIngredients: ["Ketel One Vodka", "Cockburn's Tawny Port"],
+      substitutions: [],
+    });
+    const verified = await verifyGeneratedRecipeSources(
+      [
+        recipe("Vodka & Cola", {
+          ingredients: [
+            { name: "Martini Fiero", amount: "50 мл", optional: false },
+            { name: "Coca-Cola", amount: "120 мл", optional: false },
+          ],
+          sources: [{ url: "https://www.diffordsguide.com/cocktails/recipe/2118/z-martini" }],
+        }),
+      ],
+      { fetchImpl, validator },
+    );
+
+    expect(verified).toEqual([]);
+  });
+
+  it("accepts a validated small substitution when the substitute is in inventory", async () => {
+    const fetchImpl: typeof fetch = async () => new Response(html("Daiquiri", "White rum lime juice sugar syrup"), { status: 200 });
+    const validator = async () => ({
+      verdict: "VALID_SUBSTITUTION" as const,
+      reason: "Dark rum is a close rum-family substitute for white rum.",
+      matchedRecipeTitle: "Daiquiri",
+      matchedIngredients: ["White rum", "lime juice", "sugar syrup"],
+      substitutions: [{ original: "White rum", substitute: "Dark rum", valid: true }],
+    });
+    const verified = await verifyGeneratedRecipeSources(
+      [
+        recipe("Daiquiri", {
+          ingredients: [{ name: "Dark rum", amount: "50 мл", optional: false }],
+          warnings: ["Замена: Dark rum вместо White rum даст более плотный вкус."],
+          sources: [{ url: "https://www.diffordsguide.com/cocktails/recipe/700/daiquiri" }],
+        }),
+      ],
+      {
+        fetchImpl,
+        validator,
+        inventory: [{ ...martiniWithBadAutofields, id: "dark-rum", name: "Dark rum", category: "rum", aliases: ["dark rum"] }],
+      },
+    );
+
+    expect(verified.map((item) => item.title)).toEqual(["Daiquiri"]);
   });
 
   it("drops recipes where the model returned an infeasible service message", () => {

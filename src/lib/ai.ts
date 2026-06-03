@@ -18,12 +18,23 @@ import {
   type GeneratedRecipes,
 } from "@/lib/recipe";
 
-const model = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const inventoryModel = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const recipeModel = process.env.OPENAI_RECIPE_MODEL || "gpt-5.4";
 const webSearchTool = [{ type: "web_search" as const, search_context_size: "low" as const }];
 const sourceSchema = z.object({
   title: z.string().trim().max(180).optional(),
   url: z.string().trim().url(),
 });
+const trustedRecipeSourceDomains = [
+  "diffordsguide.com",
+  "liquor.com",
+  "punchdrink.com",
+  "imbibemagazine.com",
+  "iba-world.com",
+  "tuxedono2.com",
+  "ru.inshaker.com",
+  "scienceofdrinks.com",
+];
 
 const normalizedInventoryItemSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -111,6 +122,23 @@ const aiAvailabilityChecksSchema = z.object({
   checks: z.array(aiAvailabilityCheckSchema).max(100),
 });
 
+const sourceContentValidationSchema = z.object({
+  verdict: z.enum(["VALID_EXACT", "VALID_SUBSTITUTION", "INVALID_SOURCE_MISMATCH", "INVALID_INGREDIENT_MISMATCH", "INVALID_NO_RECIPE_CONTENT"]),
+  reason: z.string().trim().min(1).max(600),
+  matchedRecipeTitle: z.string().trim().max(180).nullable(),
+  matchedIngredients: z.array(z.string().trim().min(1).max(120)).max(24).default([]),
+  substitutions: z
+    .array(
+      z.object({
+        original: z.string().trim().min(1).max(120),
+        substitute: z.string().trim().min(1).max(120),
+        valid: z.boolean(),
+      }),
+    )
+    .max(16)
+    .default([]),
+});
+
 export type NormalizedInventoryUpdate = z.infer<typeof normalizedInventoryBatchSchema>["items"][number];
 export type SourceLink = z.infer<typeof sourceSchema>;
 export type InventoryAIResult = {
@@ -134,6 +162,7 @@ export type AvailabilityAIResult = {
 export type RecipeGenerationOptions = {
   excludeTitles?: string[];
   needMoreNewRecipes?: boolean;
+  needMoreSubstitutionRecipes?: boolean;
   savedRecipeLimitReached?: boolean;
   targetNewRecipes?: number;
 };
@@ -143,6 +172,23 @@ type RecipeGenerationResult = {
   sources: SourceLink[];
   status: "SUCCESS" | "FAILED";
   error?: string;
+};
+type SourceContentValidationResult = z.infer<typeof sourceContentValidationSchema>;
+type SourceContentValidator = (input: {
+  recipe: GeneratedRecipe;
+  source: SourceLink;
+  sourceContent: string;
+  inventory: InventoryForAI[];
+}) => Promise<SourceContentValidationResult>;
+type SourceVerificationOptions = {
+  fallbackSources?: SourceLink[];
+  fetchImpl?: FetchLike;
+  inventory?: InventoryForAI[];
+  validator?: SourceContentValidator;
+};
+type VerifiedSourceContent = {
+  source: SourceLink;
+  sourceContent: string;
 };
 
 const maxGeneratedRecipes = 10;
@@ -293,6 +339,15 @@ function isHttpSourceUrl(rawUrl: string): boolean {
   }
 }
 
+function isTrustedRecipeSourceUrl(rawUrl: string): boolean {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, "");
+    return trustedRecipeSourceDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
 async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), sourceVerificationTimeoutMs);
@@ -312,17 +367,45 @@ async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: Request
   }
 }
 
-async function verifySource(source: SourceLink, fetchImpl: FetchLike): Promise<SourceLink | null> {
-  if (!isHttpSourceUrl(source.url)) {
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function extractSourceContent(html: string): string {
+  const jsonLd = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1])
+    .join("\n");
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
+  const meta = [...html.matchAll(/<meta[^>]+(?:name|property)=["'](?:description|og:title|og:description)["'][^>]+content=["']([^"']+)["'][^>]*>/gi)]
+    .map((match) => match[1])
+    .join("\n");
+  const visible = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+
+  return decodeHtmlEntities([title, meta, jsonLd, visible].join("\n"))
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 14000);
+}
+
+async function fetchVerifiedSourceContent(source: SourceLink, fetchImpl: FetchLike): Promise<VerifiedSourceContent | null> {
+  if (!isHttpSourceUrl(source.url) || !isTrustedRecipeSourceUrl(source.url)) {
     return null;
   }
 
   try {
     const head = await fetchWithTimeout(fetchImpl, source.url, { method: "HEAD" });
-    if (head.status >= 200 && head.status < 400) {
-      return source;
-    }
-    if (![403, 405, 429, 501].includes(head.status)) {
+    if (!(head.status >= 200 && head.status < 400) && ![403, 405, 429, 501].includes(head.status)) {
       return null;
     }
   } catch {
@@ -331,13 +414,21 @@ async function verifySource(source: SourceLink, fetchImpl: FetchLike): Promise<S
 
   try {
     const get = await fetchWithTimeout(fetchImpl, source.url, { method: "GET" });
-    return get.status >= 200 && get.status < 400 ? source : null;
+    if (!(get.status >= 200 && get.status < 400)) {
+      return null;
+    }
+    const sourceContent = extractSourceContent(await get.text());
+    return sourceContent.length >= 80 ? { source, sourceContent } : null;
   } catch {
     return null;
   }
 }
 
-async function verifySources(sources: SourceLink[], fetchImpl: FetchLike, cache: Map<string, Promise<SourceLink | null>>): Promise<SourceLink[]> {
+async function verifySources(
+  sources: SourceLink[],
+  fetchImpl: FetchLike,
+  cache: Map<string, Promise<VerifiedSourceContent | null>>,
+): Promise<VerifiedSourceContent[]> {
   const sanitized = sanitizeSources(sources);
   const verified = await Promise.all(
     sanitized.map((source) => {
@@ -345,13 +436,13 @@ async function verifySources(sources: SourceLink[], fetchImpl: FetchLike, cache:
       if (cached) {
         return cached;
       }
-      const promise = verifySource(source, fetchImpl);
+      const promise = fetchVerifiedSourceContent(source, fetchImpl);
       cache.set(source.url, promise);
       return promise;
     }),
   );
 
-  return limitSources(verified.filter((source): source is SourceLink => source !== null));
+  return verified.filter((source): source is VerifiedSourceContent => source !== null).slice(0, 5);
 }
 
 function recipeTitleKey(title: string): string {
@@ -441,26 +532,109 @@ export function postProcessGeneratedRecipes(
   return [...saved, ...fresh].slice(0, maxGeneratedRecipes);
 }
 
-export async function verifyGeneratedRecipeSources(
-  recipes: GeneratedRecipe[],
-  fallbackSources: SourceLink[] = [],
-  fetchImpl: FetchLike = fetch,
-): Promise<GeneratedRecipe[]> {
-  const cache = new Map<string, Promise<SourceLink | null>>();
+export async function validateRecipeSourceContentWithAI(input: {
+  recipe: GeneratedRecipe;
+  source: SourceLink;
+  sourceContent: string;
+  inventory: InventoryForAI[];
+}): Promise<SourceContentValidationResult> {
+  const client = getClient();
+
+  if (!client) {
+    return {
+      verdict: "INVALID_NO_RECIPE_CONTENT",
+      reason: "OPENAI_API_KEY is not configured for source content validation.",
+      matchedRecipeTitle: null,
+      matchedIngredients: [],
+      substitutions: [],
+    };
+  }
+
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      text: {
+        format: zodTextFormat(sourceContentValidationSchema, "recipe_source_validation"),
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "Ты проверяешь, что страница источника действительно является источником конкретного коктейля. Верни VALID_EXACT только если название и ингредиенты страницы совпадают с рецептом. Верни VALID_SUBSTITUTION только если страница содержит базовый оригинальный рецепт, а отличия в карточке являются небольшими заменами из inventory и явно описаны. Если ссылка ведет на другой рецепт, категорию, поиск, главную страницу или состав страницы не совпадает, верни INVALID_*.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            recipe: input.recipe,
+            source: input.source,
+            inventory: buildInventoryPayload(input.inventory),
+            sourceContent: input.sourceContent,
+          }),
+        },
+      ],
+    });
+
+    return response.output_parsed ?? {
+      verdict: "INVALID_NO_RECIPE_CONTENT",
+      reason: "Empty source validation response.",
+      matchedRecipeTitle: null,
+      matchedIngredients: [],
+      substitutions: [],
+    };
+  } catch {
+    return {
+      verdict: "INVALID_NO_RECIPE_CONTENT",
+      reason: "Source validation failed.",
+      matchedRecipeTitle: null,
+      matchedIngredients: [],
+      substitutions: [],
+    };
+  }
+}
+
+function isValidSourceContentValidation(result: SourceContentValidationResult): boolean {
+  if (result.verdict === "VALID_EXACT") {
+    return true;
+  }
+  if (result.verdict !== "VALID_SUBSTITUTION") {
+    return false;
+  }
+  return result.substitutions.length > 0 && result.substitutions.every((substitution) => substitution.valid);
+}
+
+export async function verifyGeneratedRecipeSources(recipes: GeneratedRecipe[], options: SourceVerificationOptions = {}): Promise<GeneratedRecipe[]> {
+  const fallbackSources = options.fallbackSources ?? [];
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const inventory = options.inventory ?? [];
+  const validator = options.validator ?? validateRecipeSourceContentWithAI;
+  const cache = new Map<string, Promise<VerifiedSourceContent | null>>();
   const canUseFallbackForSingleRecipe = recipes.length === 1;
   const verifiedRecipes = await Promise.all(
     recipes.map(async (recipe) => {
       const recipeSources = sanitizeSources(recipe.sources);
       const candidates = recipeSources.length ? recipeSources : canUseFallbackForSingleRecipe ? sanitizeSources(fallbackSources) : [];
-      const verifiedSources = await verifySources(candidates, fetchImpl, cache);
+      const reachableSources = await verifySources(candidates, fetchImpl, cache);
+      const validSources: SourceLink[] = [];
 
-      if (verifiedSources.length === 0) {
+      for (const reachable of reachableSources) {
+        const validation = await validator({
+          recipe,
+          source: reachable.source,
+          sourceContent: reachable.sourceContent,
+          inventory,
+        });
+        if (isValidSourceContentValidation(validation)) {
+          validSources.push(reachable.source);
+        }
+      }
+
+      if (validSources.length === 0) {
         return null;
       }
 
       return {
         ...recipe,
-        sources: verifiedSources,
+        sources: limitSources(validSources),
       };
     }),
   );
@@ -492,6 +666,43 @@ function buildSavedRecipesPayload(savedRecipes: SavedRecipeForAI[]) {
     warnings: saved.recipe.warnings,
     sources: saved.recipe.sources ?? [],
   }));
+}
+
+function inventoryRole(item: Pick<InventoryForAI, "kind" | "name" | "category" | "description" | "aliases">): string | null {
+  const text = normalizeText([item.name, item.category, item.description, ...item.aliases].join(" "));
+
+  if (item.kind === "TOOL") {
+    return null;
+  }
+  if (text.match(/white rum|dark rum|rum|ром/)) return "rum";
+  if (text.match(/vodka|водк/)) return "vodka";
+  if (text.match(/gin|джин/)) return "gin";
+  if (text.match(/tequila|текил/)) return "tequila";
+  if (text.match(/whiskey|whisky|bourbon|виски|бурбон/)) return "whiskey";
+  if (text.match(/coffee|кофе|chocolate|cream|сливоч|шоколад|liqueur|ликер|ликер/)) return "dessert-liqueur";
+  if (text.match(/orange|triple sec|cointreau|апельсин/)) return "orange-liqueur";
+  if (text.match(/lime|lemon|citrus|лайм|лимон|цитрус/)) return "citrus";
+  if (text.match(/syrup|сироп/)) return "syrup";
+  if (text.match(/cola|tonic|soda|sprite|газ|тоник|кола/)) return "sparkling-mixer";
+  if (text.match(/juice|сок/)) return "juice";
+
+  return null;
+}
+
+function buildSubstitutionHints(inventory: InventoryForAI[]) {
+  const candidates = inventory
+    .map((item) => ({ id: item.id, name: item.name, role: inventoryRole(item) }))
+    .filter((item): item is { id: string; name: string; role: string } => Boolean(item.role));
+  const hints: Array<{ originalRole: string; availableSubstitutes: string[] }> = [];
+
+  for (const role of [...new Set(candidates.map((candidate) => candidate.role))]) {
+    const names = candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.name);
+    if (names.length > 0) {
+      hints.push({ originalRole: role, availableSubstitutes: names });
+    }
+  }
+
+  return hints.slice(0, 30);
 }
 
 function normalizeAiGeneratedRecipes(parsed: z.infer<typeof aiGeneratedRecipesSchema>): GeneratedRecipes {
@@ -537,7 +748,7 @@ export async function normalizeInventoryWithAI(input: Partial<InventoryInput>): 
 
   try {
     const response = await client.responses.create({
-      model,
+      model: inventoryModel,
       tools: webSearchTool,
       include: ["web_search_call.action.sources"],
       input: [
@@ -579,7 +790,7 @@ export async function normalizeInventoryBatchWithAI(inventory: InventoryForAI[])
 
   try {
     const response = await client.responses.create({
-      model,
+      model: inventoryModel,
       tools: webSearchTool,
       include: ["web_search_call.action.sources"],
       input: [
@@ -609,7 +820,7 @@ export async function normalizeInventoryBatchWithAI(inventory: InventoryForAI[])
     });
 
     const parsed = parseJson(response.output_text, normalizedInventoryBatchSchema);
-    return { updates: parsed.items, sources: extractWebSources(response), model };
+    return { updates: parsed.items, sources: extractWebSources(response), model: inventoryModel };
   } catch {
     return { updates: [], sources: [], model: "local-demo" };
   }
@@ -624,7 +835,7 @@ export function buildRecipeGenerationInstructions(options: RecipeGenerationOptio
 
     "### MATCHING STRATEGY (СТРАТЕГИЯ ПОДБОРА)\n- Сначала генерируй EXACT-match: рецепты, которые можно собрать без замен.\n- Затем SUBSTITUTION-match: рецепты с заменами, но только на предметы, которые есть в inventory.\n- Если оригинальный рецепт найден, но часть ингредиентов заменена из inventory, это допустимо только как matchType SUBSTITUTION с объяснением замены.\n- Если пользователь не дал конкретный запрос, активно предлагай известные варианты по категориям: шоты, хайболы, сауэры, лонг-дринки, спритцы и простые миксы.\n- Учитывай savedRecipes как контекст и максимум 2 кандидата, а не как основную выдачу.\n- Если сохраненный рецепт можно сделать сейчас, верни его с savedRecipeId и matchType SAVED, затем продолжай искать новые известные варианты.\n- Если сохраненный рецепт можно сделать только с заменой из inventory, верни savedRecipeId, matchType SUBSTITUTION и явно опиши замену.",
 
-    "### SUBSTITUTION QUALITY (КАЧЕСТВО ЗАМЕН)\n- Хорошая замена сохраняет роль компонента в коктейле: базовый алкоголь близкой семьи, ликер похожего вкусового профиля, цитрус на цитрус, сироп на близкий сироп.\n- Допустимые примеры: белый ром заменить имеющимся темным ромом; кофейный ликер заменить имеющимся шоколадным сливочным ликером, если это сохраняет десертный профиль.\n- Слабые или случайные замены не подходят. Не заменяй ключевой вкус несвязанным предметом только ради заполнения списка.\n- В description или warnings кратко объясняй каждую замену и ее влияние на вкус.",
+    "### SUBSTITUTION QUALITY (КАЧЕСТВО ЗАМЕН)\n- Если exact-рецептов мало, активно используй substitutionHints из user payload, чтобы найти известные рецепты с небольшими корректными заменами.\n- Хорошая замена сохраняет роль компонента в коктейле: базовый алкоголь близкой семьи, ликер похожего вкусового профиля, цитрус на цитрус, сироп на близкий сироп, газированный миксер на похожий миксер.\n- Допустимые примеры: белый ром заменить имеющимся темным ромом; кофейный ликер заменить имеющимся шоколадным сливочным ликером, если это сохраняет десертный профиль.\n- Слабые или случайные замены не подходят. Не заменяй ключевой вкус несвязанным предметом только ради заполнения списка.\n- В description или warnings кратко объясняй каждую замену и ее влияние на вкус.",
 
     "### INVENTORY CONSTRAINTS (СТРОГИЕ ОГРАНИЧЕНИЯ ИНВЕНТАРЯ)\n- Возвращай только варианты, которые можно приготовить прямо сейчас из текущего inventory.\n- Все обязательные ингредиенты и инструменты в ответе должны присутствовать в inventory.\n- Лед, содовую, сахар, соки, гарнир и инструменты используй только когда такие предметы явно есть в inventory.\n- Если оригинальный компонент отсутствует, замена возможна только на существующий в inventory аналог; явно укажи замену в description или warnings.\n- Если для рецепта нет оригинального компонента и нет качественного аналога в inventory, просто пропусти этот рецепт и не добавляй его в recipes.\n- Не добавляй в ответ карточки с фразами вроде \"рецепт отбрасывается\", \"невозможно приготовить\", \"не хватает ингредиентов\".\n- Не предлагай докупить ингредиенты.",
 
@@ -638,6 +849,7 @@ export function buildRecipeGenerationInstructions(options: RecipeGenerationOptio
         "- Это повторный вызов для добора вариантов. Возвращай только новые осуществимые рецепты.",
         "- Исключи рецепты из списка excludeTitles.",
         "- Не возвращай savedRecipes как кандидатов.",
+        resolvedOptions.needMoreSubstitutionRecipes ? "- Exact-вариантов осталось мало: ищи известные рецепты с небольшими корректными заменами из substitutionHints и inventory." : "",
         resolvedOptions.savedRecipeLimitReached ? "- Установи savedRecipeId = null для всех новых рецептов." : "",
         resolvedOptions.targetNewRecipes ? `- Сгенерируй до ${resolvedOptions.targetNewRecipes} новых вариантов, если это физически возможно из inventory.` : "",
       ]
@@ -658,9 +870,11 @@ export function buildRecipeGenerationPayload(
   return {
     userPrompt: prompt,
     inventory: buildInventoryPayload(inventory),
+    substitutionHints: buildSubstitutionHints(inventory),
     savedRecipes: buildSavedRecipesPayload(savedRecipes),
     excludeTitles: options.excludeTitles ?? [],
     needMoreNewRecipes: options.needMoreNewRecipes ?? false,
+    needMoreSubstitutionRecipes: options.needMoreSubstitutionRecipes ?? false,
     savedRecipeLimitReached: options.savedRecipeLimitReached ?? false,
     targetNewRecipes: options.targetNewRecipes ?? null,
   };
@@ -720,7 +934,7 @@ export async function checkSavedRecipesAvailability(inventory: InventoryForAI[],
 
   try {
     const response = await client.responses.parse({
-      model,
+      model: recipeModel,
       tools: webSearchTool,
       include: ["web_search_call.action.sources"],
       text: {
@@ -752,17 +966,17 @@ export async function checkSavedRecipesAvailability(inventory: InventoryForAI[],
     if (checks.length === 0) {
       return {
         checks: [],
-        model,
+        model: recipeModel,
         status: "FAILED",
         error: "OpenAI не вернул проверки для сохраненных рецептов.",
       };
     }
 
-    return { checks, model, status: "SUCCESS" };
+    return { checks, model: recipeModel, status: "SUCCESS" };
   } catch {
     return {
       checks: [],
-      model,
+      model: recipeModel,
       status: "FAILED",
       error: "OpenAI не вернул валидную проверку доступности.",
     };
@@ -777,7 +991,7 @@ async function requestGeneratedRecipes(
   options: RecipeGenerationOptions = {},
 ) {
   const response = await client.responses.parse({
-    model,
+    model: recipeModel,
     tools: webSearchTool,
     include: ["web_search_call.action.sources"],
     text: {
@@ -825,7 +1039,7 @@ export async function generateRecipes(
   try {
     const first = await requestGeneratedRecipes(client, inventory, prompt, savedRecipes);
     const firstProcessed = postProcessGeneratedRecipes(first.parsed.recipes, inventory, savedRecipes);
-    let processed = await verifyGeneratedRecipeSources(firstProcessed, first.sources);
+    let processed = await verifyGeneratedRecipeSources(firstProcessed, { fallbackSources: first.sources, inventory });
     let sources = limitSources(processed.flatMap((recipe) => recipe.sources ?? []));
 
     if (processed.length < minTargetRecipes) {
@@ -833,11 +1047,12 @@ export async function generateRecipes(
         const retry = await requestGeneratedRecipes(client, inventory, prompt, savedRecipes, {
           excludeTitles: [...firstProcessed.map((recipe) => recipe.title), ...savedRecipes.map((recipe) => recipe.title)],
           needMoreNewRecipes: true,
+          needMoreSubstitutionRecipes: true,
           savedRecipeLimitReached: true,
           targetNewRecipes: maxGeneratedRecipes - processed.length,
         });
         const retryProcessed = postProcessGeneratedRecipes(retry.parsed.recipes, inventory, savedRecipes);
-        const retryVerified = await verifyGeneratedRecipeSources(retryProcessed, retry.sources);
+        const retryVerified = await verifyGeneratedRecipeSources(retryProcessed, { fallbackSources: retry.sources, inventory });
         processed = postProcessGeneratedRecipes([...processed, ...retryVerified], inventory, savedRecipes);
         sources = limitSources(processed.flatMap((recipe) => recipe.sources ?? []));
       } catch {
@@ -846,11 +1061,11 @@ export async function generateRecipes(
     }
 
     if (processed.length > 0) {
-      return { recipes: processed, model, sources, status: "SUCCESS" };
+      return { recipes: processed, model: recipeModel, sources, status: "SUCCESS" };
     }
   } catch (error) {
     return {
-      model,
+      model: recipeModel,
       recipes: [],
       sources: [],
       status: "FAILED",
@@ -861,7 +1076,7 @@ export async function generateRecipes(
   }
 
   return {
-    model,
+    model: recipeModel,
     recipes: [],
     sources: [],
     status: "FAILED",

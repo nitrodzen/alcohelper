@@ -5,6 +5,7 @@ import { z } from "zod";
 import { authOptions, getSessionUserId } from "@/lib/auth";
 import { buildAvailabilityInventorySnapshot, isAvailabilityInventorySnapshotStale } from "@/lib/availability-freshness";
 import { verifyGeneratedRecipeSources } from "@/lib/ai";
+import type { InventoryForAI } from "@/lib/inventory";
 import { generatedRecipeSchema } from "@/lib/recipe";
 import { prisma } from "@/lib/prisma";
 
@@ -76,7 +77,24 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Не удалось сохранить рецепт." }, { status: 400 });
   }
-  const verifiedRecipes = await verifyGeneratedRecipeSources([parsed.data.recipe]);
+  const currentItems = await prisma.inventoryItem.findMany({
+    where: { userId },
+    orderBy: [{ kind: "asc" }, { name: "asc" }],
+  });
+  const inventory: InventoryForAI[] = currentItems.map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    name: item.name,
+    category: item.category,
+    quantity: item.quantity === null ? null : Number(item.quantity),
+    unit: item.unit,
+    abv: item.abv === null ? null : Number(item.abv),
+    description: item.description,
+    icon: item.icon,
+    aliases: item.aliases,
+    aiReviewedAt: item.aiReviewedAt,
+  }));
+  const verifiedRecipes = await verifyGeneratedRecipeSources([parsed.data.recipe], { inventory });
   const verifiedRecipe = verifiedRecipes[0];
 
   if (!verifiedRecipe) {
