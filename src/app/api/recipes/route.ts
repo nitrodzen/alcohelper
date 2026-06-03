@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { authOptions, getSessionUserId } from "@/lib/auth";
 import { buildAvailabilityInventorySnapshot, isAvailabilityInventorySnapshotStale } from "@/lib/availability-freshness";
+import { verifyGeneratedRecipeSources } from "@/lib/ai";
 import { generatedRecipeSchema } from "@/lib/recipe";
 import { prisma } from "@/lib/prisma";
 
@@ -75,13 +76,19 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Не удалось сохранить рецепт." }, { status: 400 });
   }
+  const verifiedRecipes = await verifyGeneratedRecipeSources([parsed.data.recipe]);
+  const verifiedRecipe = verifiedRecipes[0];
+
+  if (!verifiedRecipe) {
+    return NextResponse.json({ error: "Источник рецепта недоступен, рецепт не сохранен." }, { status: 400 });
+  }
 
   const saved = await prisma.savedRecipe.create({
     data: {
       userId,
-      title: parsed.data.recipe.title,
-      description: parsed.data.recipe.description,
-      recipe: parsed.data.recipe as unknown as Prisma.InputJsonValue,
+      title: verifiedRecipe.title,
+      description: verifiedRecipe.description,
+      recipe: verifiedRecipe as unknown as Prisma.InputJsonValue,
       inventorySnapshot: parsed.data.inventorySnapshot as unknown as Prisma.InputJsonValue,
       model: parsed.data.model,
       requestPrompt: parsed.data.requestPrompt,

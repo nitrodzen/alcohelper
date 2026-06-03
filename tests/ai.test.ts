@@ -6,6 +6,7 @@ import {
   createNormalizedInventoryPatch,
   isValidNormalizedInventoryUpdate,
   postProcessGeneratedRecipes,
+  verifyGeneratedRecipeSources,
 } from "@/lib/ai";
 import type { GeneratedRecipe } from "@/lib/recipe";
 import type { InventoryForAI } from "@/lib/inventory";
@@ -139,7 +140,9 @@ describe("recipe generation prompt helpers", () => {
     expect(instructions).toContain("ru.inshaker.com");
     expect(instructions).toContain("scienceofdrinks.com");
     expect(instructions).toContain("recipe.sources");
-    expect(instructions).toContain("адаптацию/аналог");
+    expect(instructions).toContain("реальный web source");
+    expect(instructions).toContain("рабочим URL");
+    expect(instructions).toContain("прямые страницы рецептов");
     expect(instructions).toContain("просто пропусти этот рецепт");
     expect(instructions).toContain("Слабые или случайные замены не подходят");
     expect(instructions).toContain("savedRecipes");
@@ -190,7 +193,7 @@ describe("recipe generation prompt helpers", () => {
     expect(processed.map((item) => item.title)).toEqual(["Saved 1", "Saved 2", "Fresh 1", "Fresh 2"]);
   });
 
-  it("dedupes titles, keeps up to 10 options, and drops invalid sources", () => {
+  it("dedupes titles, keeps up to 10 options, and drops invalid source URLs", () => {
     const recipes = Array.from({ length: 11 }, (_, index) =>
       recipe(index === 1 ? "Fresh 0" : `Fresh ${index}`, {
         sources: index === 0 ? [{ url: "not-a-url" }, { url: "https://example.com/recipe" }] : [],
@@ -202,6 +205,63 @@ describe("recipe generation prompt helpers", () => {
     expect(processed).toHaveLength(10);
     expect(processed.filter((item) => item.title === "Fresh 0")).toHaveLength(1);
     expect(processed[0].sources).toEqual([{ url: "https://example.com/recipe" }]);
+  });
+
+  it("does not spread fallback web search sources across multiple recipe cards", () => {
+    const processed = postProcessGeneratedRecipes(
+      [recipe("Fresh 1"), recipe("Fresh 2")],
+      [martiniWithBadAutofields],
+      [],
+      [{ url: "https://example.com/fallback" }],
+    );
+
+    expect(processed.map((item) => item.sources)).toEqual([[], []]);
+  });
+
+  it("keeps only recipes with verified working sources", async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("ok")) {
+        return new Response("", { status: 200 });
+      }
+      if (url.includes("redirect")) {
+        return new Response("", { status: 301 });
+      }
+      if (url.includes("head-blocked")) {
+        return new Response("", { status: init?.method === "HEAD" ? 405 : 200 });
+      }
+      if (url.includes("network")) {
+        throw new Error("network");
+      }
+      return new Response("", { status: 404 });
+    };
+
+    const verified = await verifyGeneratedRecipeSources(
+      [
+        recipe("OK", { sources: [{ url: "https://example.com/ok" }, { url: "https://example.com/missing" }] }),
+        recipe("Redirect", { sources: [{ url: "https://example.com/redirect" }] }),
+        recipe("Head blocked", { sources: [{ url: "https://example.com/head-blocked" }] }),
+        recipe("Missing", { sources: [{ url: "https://example.com/missing" }] }),
+        recipe("Network", { sources: [{ url: "https://example.com/network" }] }),
+        recipe("No source"),
+      ],
+      [],
+      fetchImpl,
+    );
+
+    expect(verified.map((item) => item.title)).toEqual(["OK", "Redirect", "Head blocked"]);
+    expect(verified[0].sources).toEqual([{ url: "https://example.com/ok" }]);
+  });
+
+  it("uses verified fallback sources only for a single recipe without own sources", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("", { status: 200 });
+
+    const single = await verifyGeneratedRecipeSources([recipe("Single")], [{ url: "https://example.com/fallback" }], fetchImpl);
+    const multiple = await verifyGeneratedRecipeSources([recipe("First"), recipe("Second")], [{ url: "https://example.com/fallback" }], fetchImpl);
+
+    expect(single).toHaveLength(1);
+    expect(single[0].sources).toEqual([{ url: "https://example.com/fallback" }]);
+    expect(multiple).toEqual([]);
   });
 
   it("drops recipes where the model returned an infeasible service message", () => {
