@@ -112,6 +112,11 @@ describe("recipe generation prompt helpers", () => {
     expect(queries.some((query) => query.includes("cocktail recipe"))).toBe(true);
   });
 
+  it("adds English search queries for Russian classic cocktail names", () => {
+    expect(buildRecipeSearchQueries("коктейль черный русский")).toContain("Black Russian cocktail recipe");
+    expect(buildRecipeSearchQueries("белый русский")).toContain("White Russian cocktail recipe");
+  });
+
   it("passes the user comment and full inventory without changing item data", () => {
     const payload = buildRecipeGenerationPayload([martiniWithBadAutofields], "хочу Б-52 или похожий шот", [
       {

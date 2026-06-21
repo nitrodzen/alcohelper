@@ -482,6 +482,17 @@ function knownRecipeResearchSources(prompt: string): SourceLink[] {
       },
     ];
   }
+  if (normalized.includes("черный русский") || normalized.includes("black russian")) {
+    return [
+      { title: "Black Russian", url: "https://www.diffordsguide.com/cocktails/recipe/316/black-russian" },
+      { title: "IBA Black Russian", url: "https://iba-world.com/black-russian/" },
+    ];
+  }
+  if (normalized.includes("белый русский") || normalized.includes("white russian")) {
+    return [
+      { title: "White Russian", url: "https://www.diffordsguide.com/cocktails/recipe/2092/white-russian" },
+    ];
+  }
   return [];
 }
 
@@ -582,7 +593,29 @@ function extractSourceContent(html: string): string {
   return decodeHtmlEntities([title, meta, jsonLd, visible].join("\n"))
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 14000);
+    .slice(0, 50000);
+}
+
+function sourceExcerptForPrompt(sourceContent: string, prompt: string): string {
+  const normalizedContent = normalizeText(sourceContent);
+  const terms = [
+    ...buildRecipeSearchQueries(prompt),
+    prompt,
+    ...prompt.split(/\s+/),
+  ]
+    .map(normalizeText)
+    .filter((term) => term.length >= 4);
+  const indexes = terms
+    .map((term) => normalizedContent.indexOf(term))
+    .filter((index) => index >= 0);
+  const firstRecipeMarker = normalizedContent.search(/состав|ингредиент|ingredients|recipe|preparation|приготовление/);
+  if (firstRecipeMarker >= 0) {
+    indexes.push(firstRecipeMarker);
+  }
+  const start = Math.max(0, (indexes.length ? Math.min(...indexes) : 0) - 2500);
+  const excerpt = sourceContent.slice(start, start + 18000);
+
+  return excerpt.length >= 500 ? excerpt : sourceContent.slice(0, 18000);
 }
 
 async function fetchVerifiedSourceContent(source: SourceLink, fetchImpl: FetchLike): Promise<VerifiedSourceContent | null> {
@@ -1324,7 +1357,7 @@ async function parseCanonicalRecipeFromSource(
           content: JSON.stringify({
             prompt,
             source,
-            sourceContent,
+            sourceContent: sourceExcerptForPrompt(sourceContent, prompt),
           }),
         },
       ],
@@ -1415,7 +1448,7 @@ async function parseResearchRecipeFromFetchedSources(
             pages: sources.map((source, index) => ({
               index: index + 1,
               source: source.source,
-              sourceContent: source.sourceContent.slice(0, 18000),
+              sourceContent: sourceExcerptForPrompt(source.sourceContent, prompt),
             })),
           }),
         },
