@@ -128,6 +128,7 @@ export type RecipeLookupResult = {
   missingIngredients: MissingIngredient[];
   shoppingList: ShoppingListItem[];
   substitutionOptions: SubstitutionOption[];
+  alternatives: GeneratedRecipe[];
   tasteImpact: TasteImpact;
   sourceStatus: SourceStatus;
   sources: SourceLink[];

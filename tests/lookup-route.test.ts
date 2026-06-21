@@ -76,6 +76,7 @@ function successfulLookup(title: string) {
     missingIngredients: [],
     shoppingList: [],
     substitutionOptions: [],
+    alternatives: [],
     tasteImpact: { level: "NONE", summary: "Все есть." },
     sourceStatus: "VERIFIED",
     sources: [{ url: "https://www.diffordsguide.com/cocktails/recipe/example", title }],
@@ -131,5 +132,51 @@ describe("POST /api/recipes/lookup", () => {
     expect(response.status).toBe(200);
     expect(data.recipe.title).toBe("Johnny Silverhand");
     expect(mocks.lookupRecipe).toHaveBeenCalledWith(expect.any(Array), "джонни сильверхенд");
+  });
+
+  it("returns a structured response instead of 502 for a friendly lookup failure", async () => {
+    mocks.lookupRecipe.mockResolvedValue({
+      recipe: {
+        title: "Unknown",
+        description: "Research did not find a reliable recipe.",
+        savedRecipeId: null,
+        matchType: null,
+        ingredients: [],
+        tools: [],
+        steps: ["Try again", "Clarify the name"],
+        warnings: [],
+        sources: [],
+        makeability: "CANNOT_MAKE",
+        missingIngredients: [],
+        shoppingList: [],
+        substitutionOptions: [],
+        tasteImpact: { level: "HIGH", summary: "No recipe found." },
+        sourceStatus: "FAILED",
+      },
+      adaptedRecipe: null,
+      makeability: "CANNOT_MAKE",
+      missingIngredients: [],
+      shoppingList: [],
+      substitutionOptions: [],
+      alternatives: [],
+      tasteImpact: { level: "HIGH", summary: "No recipe found." },
+      sourceStatus: "FAILED",
+      sources: [],
+      model: "test-model",
+      status: "SUCCESS",
+      error: "Не нашел рецепт по этому запросу.",
+    });
+
+    const response = await POST(
+      new Request("http://localhost/api/recipes/lookup", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "unknown cocktail" }),
+      }),
+    );
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.error).toBe("Не нашел рецепт по этому запросу.");
+    expect(data.recipe.makeability).toBe("CANNOT_MAKE");
   });
 });

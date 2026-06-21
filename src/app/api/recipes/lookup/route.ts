@@ -71,17 +71,6 @@ export async function POST(request: Request) {
     },
   });
 
-  if (result.status === "FAILED") {
-    return NextResponse.json(
-      {
-        ...responseResult,
-        historyId: history.id,
-        error: result.error ?? "Не удалось найти рецепт.",
-      },
-      { status: 502 },
-    );
-  }
-
   return NextResponse.json({
     ...responseResult,
     historyId: history.id,

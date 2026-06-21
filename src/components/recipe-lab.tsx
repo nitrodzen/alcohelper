@@ -52,6 +52,16 @@ function groupRecipes(recipes: GeneratedRecipe[]) {
   };
 }
 
+function sourceStatusLabel(status?: RecipeLookupResult["sourceStatus"]) {
+  if (status === "VERIFIED") {
+    return "Источник проверен";
+  }
+  if (status === "UNVERIFIED") {
+    return "Research-режим: рецепт найден, но источник не прошел строгую проверку";
+  }
+  return "Источник не найден";
+}
+
 function RecipeStatus({ status, impact }: { status?: MakeabilityStatus; impact?: GeneratedRecipe["tasteImpact"] }) {
   const resolved = status ?? "AVAILABLE";
   const Icon = makeabilityIcons[resolved];
@@ -340,15 +350,16 @@ export function RecipeLab() {
       return null;
     }
 
-    const missing = lookupResult.missingIngredients.map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}`);
-    const shopping = lookupResult.shoppingList.map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}${item.note ? ` · ${item.note}` : ""}`);
+    const missing = (lookupResult.missingIngredients ?? []).map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}`);
+    const shopping = (lookupResult.shoppingList ?? []).map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}${item.note ? ` · ${item.note}` : ""}`);
     const adaptedRecipe = lookupResult.adaptedRecipe;
+    const alternatives = lookupResult.alternatives ?? [];
 
     return (
       <div className="lookup-result">
         <div className={`lookup-summary ${statusClass(lookupResult.makeability)}`}>
           <RecipeStatus status={lookupResult.makeability} impact={lookupResult.tasteImpact} />
-          <span>{lookupResult.sourceStatus === "VERIFIED" ? "Источник проверен" : "Источник не подтвержден"}</span>
+          <span>{sourceStatusLabel(lookupResult.sourceStatus)}</span>
         </div>
         <RecipeCard recipe={lookupResult.recipe} saved={isSaved(lookupResult.recipe)} onSave={() => save(lookupResult.recipe, lookupResult)} saveLabel="Сохранить оригинал" />
         <div className="lookup-grid">
@@ -373,6 +384,19 @@ export function RecipeLab() {
               onSave={() => save(adaptedRecipe, lookupResult)}
               saveLabel="Сохранить адаптацию"
             />
+          </section>
+        ) : null}
+        {alternatives.length ? (
+          <section className="result-section">
+            <div className="section-heading compact">
+              <h2>Похожие из инвентаря</h2>
+              <span className="count-pill">{alternatives.length}</span>
+            </div>
+            <div className="recipe-grid">
+              {alternatives.map((recipe) => (
+                <RecipeCard key={`alternative-${recipe.title}`} recipe={recipe} saved={isSaved(recipe)} onSave={() => save(recipe, lookupResult)} />
+              ))}
+            </div>
           </section>
         ) : null}
       </div>

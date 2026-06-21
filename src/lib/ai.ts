@@ -163,6 +163,12 @@ const recipeLookupAssessmentSchema = z.object({
   adaptedRecipe: aiGeneratedRecipeSchema.nullable(),
 });
 
+const recipeResearchSchema = z.object({
+  recipe: aiGeneratedRecipeSchema,
+  researchSummary: z.string().trim().max(900).optional(),
+  sources: z.array(sourceSchema).max(8).default([]),
+});
+
 export type NormalizedInventoryUpdate = z.infer<typeof normalizedInventoryBatchSchema>["items"][number];
 export type SourceLink = z.infer<typeof sourceSchema>;
 export type InventoryAIResult = {
@@ -206,14 +212,15 @@ export type RecipeLookupResult = {
   missingIngredients: MissingIngredient[];
   shoppingList: ShoppingListItem[];
   substitutionOptions: SubstitutionOption[];
+  alternatives: GeneratedRecipe[];
   tasteImpact: TasteImpact;
-  sourceStatus: "VERIFIED" | "FAILED";
+  sourceStatus: "VERIFIED" | "UNVERIFIED" | "FAILED";
   sources: SourceLink[];
   model: string;
   status: "SUCCESS" | "FAILED";
   error?: string;
 };
-export type RecipeInventoryAssessment = Omit<RecipeLookupResult, "recipe" | "sourceStatus" | "sources" | "model" | "status" | "error"> & {
+export type RecipeInventoryAssessment = Omit<RecipeLookupResult, "recipe" | "alternatives" | "sourceStatus" | "sources" | "model" | "status" | "error"> & {
   warnings: string[];
 };
 type SourceContentValidationResult = z.infer<typeof sourceContentValidationSchema>;
@@ -1101,28 +1108,32 @@ function normalizeAiAvailabilityChecks(parsed: z.infer<typeof aiAvailabilityChec
 }
 
 async function searchRecipeSourceCandidates(client: OpenAI, prompt: string): Promise<SourceLink[]> {
-  const response = await client.responses.parse({
-    model: recipeModel,
-    tools: webSearchTool,
-    include: ["web_search_call.action.sources"],
-    text: {
-      format: zodTextFormat(recipeSourceCandidatesSchema, "recipe_source_candidates"),
-    },
-    input: [
-      {
-        role: "system",
-        content:
-          "Найди прямые страницы существующего коктейльного рецепта по запросу пользователя. Верни только реальные страницы рецептов, не главные страницы, не поиск, не категории. Приоритет: Difford's Guide, Liquor.com, Punch, Imbibe, IBA, Tuxedo No. 2, Inshaker, Science of Drinks. Если рецепт из поп-культуры, ищи человеческие опубликованные рецепты, а не выдумывай состав.",
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      tools: webSearchTool,
+      include: ["web_search_call.action.sources"],
+      text: {
+        format: zodTextFormat(recipeSourceCandidatesSchema, "recipe_source_candidates"),
       },
-      {
-        role: "user",
-        content: JSON.stringify({ prompt }),
-      },
-    ],
-  });
+      input: [
+        {
+          role: "system",
+          content:
+            "Найди прямые страницы существующего коктейльного рецепта по запросу пользователя. Верни только реальные страницы рецептов, не главные страницы, не поиск, не категории. Приоритет: Difford's Guide, Liquor.com, Punch, Imbibe, IBA, Tuxedo No. 2, Inshaker, Science of Drinks. Если рецепт из поп-культуры, ищи человеческие опубликованные рецепты, а не выдумывай состав.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({ prompt }),
+        },
+      ],
+    });
 
-  const parsedSources = response.output_parsed?.sources ?? [];
-  return limitSources([...parsedSources, ...extractWebSources(response)]);
+    const parsedSources = response.output_parsed?.sources ?? [];
+    return limitSources([...parsedSources, ...extractWebSources(response)]);
+  } catch {
+    return [];
+  }
 }
 
 async function parseCanonicalRecipeFromSource(
@@ -1211,6 +1222,71 @@ async function findVerifiedCanonicalRecipe(
   return null;
 }
 
+async function researchRecipeWithAI(client: OpenAI, prompt: string): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      tools: webSearchTool,
+      include: ["web_search_call.action.sources"],
+      text: {
+        format: zodTextFormat(recipeResearchSchema, "cocktail_recipe_research"),
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "Ты делаешь дружелюбный research по конкретному коктейлю. Найди существующий рецепт в сети и верни оригинальный состав, краткое описание или историю, шаги приготовления и источники. Не адаптируй рецепт под inventory и не скрывай, если рецепт из поп-культуры или вариантов несколько. Если точного канонического варианта нет, выбери наиболее распространенный опубликованный рецепт и напиши это в description. Верни только JSON по схеме.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({ prompt }),
+        },
+      ],
+    });
+
+    if (!response.output_parsed) {
+      return null;
+    }
+
+    const sources = limitSources([...sanitizeSources(response.output_parsed.sources), ...extractWebSources(response)]);
+    const normalized = normalizeAiGeneratedRecipes({ recipes: [response.output_parsed.recipe] }).recipes[0];
+    const recipe = generatedRecipeSchema.parse({
+      ...normalized,
+      description: response.output_parsed.researchSummary || normalized.description,
+      savedRecipeId: null,
+      matchType: null,
+      sources,
+      sourceStatus: "UNVERIFIED",
+    });
+
+    return { recipe, sources };
+  } catch {
+    return null;
+  }
+}
+
+async function findLookupAlternatives(inventory: InventoryForAI[], recipe: GeneratedRecipe): Promise<GeneratedRecipe[]> {
+  if (!inventory.some((item) => item.kind !== "TOOL")) {
+    return [];
+  }
+
+  const result = await generateRecipes(
+    inventory,
+    `Пользователь искал "${recipe.title}". Если оригинал нельзя собрать, предложи похожие по стилю или вкусовой роли коктейли, которые можно сделать из inventory сейчас или с небольшой conservative-заменой.`,
+    [],
+  );
+
+  if (result.status !== "SUCCESS") {
+    return [];
+  }
+
+  const originalKey = recipeTitleKey(recipe.title);
+  return result.recipes
+    .filter((candidate) => recipeTitleKey(candidate.title) !== originalKey)
+    .filter((candidate) => candidate.makeability === "AVAILABLE" || candidate.makeability === "AVAILABLE_WITH_SUBSTITUTIONS")
+    .slice(0, 4);
+}
+
 export async function lookupRecipe(
   inventory: InventoryForAI[],
   prompt = "",
@@ -1249,6 +1325,7 @@ export async function lookupRecipe(
       missingIngredients: [],
       shoppingList: [],
       substitutionOptions: [],
+      alternatives: [],
       tasteImpact: tasteImpact("HIGH", "Без названия рецепта нечего проверять."),
       sourceStatus: "FAILED",
       sources: [],
@@ -1288,6 +1365,7 @@ export async function lookupRecipe(
       missingIngredients: [],
       shoppingList: [],
       substitutionOptions: [],
+      alternatives: [],
       tasteImpact: tasteImpact("HIGH", "Источник рецепта не был найден и проверен."),
       sourceStatus: "FAILED",
       sources: [],
@@ -1298,77 +1376,19 @@ export async function lookupRecipe(
   }
 
   try {
-    const found = await findVerifiedCanonicalRecipe(client, trimmedPrompt, inventory, options.fetchImpl ?? fetch);
-    if (!found) {
-      return {
-        recipe: annotateRecipeWithAssessment(
-          {
-            title: trimmedPrompt,
-            description: "Не удалось найти подтвержденную страницу рецепта в доверенных источниках.",
-            savedRecipeId: null,
-            matchType: null,
-            ingredients: [],
-            tools: [],
-            steps: ["Попробуйте уточнить название коктейля.", "Например: Black Russian или Johnny Silverhand cocktail."],
-            warnings: [],
-            sources: [],
-          },
-          {
-            adaptedRecipe: null,
-            makeability: "CANNOT_MAKE",
-            missingIngredients: [],
-            shoppingList: [],
-            substitutionOptions: [],
-            tasteImpact: tasteImpact("HIGH", "Без проверенного источника портал не показывает рецепт."),
-            warnings: [],
-          },
-          "FAILED",
-        ),
-        adaptedRecipe: null,
-        makeability: "CANNOT_MAKE",
-        missingIngredients: [],
-        shoppingList: [],
-        substitutionOptions: [],
-        tasteImpact: tasteImpact("HIGH", "Без проверенного источника портал не показывает рецепт."),
-        sourceStatus: "FAILED",
-        sources: [],
-        model: recipeModel,
-        status: "FAILED",
-        error: "Не нашел подтвержденную страницу рецепта в доверенных источниках.",
-      };
-    }
+    const verified = await findVerifiedCanonicalRecipe(client, trimmedPrompt, inventory, options.fetchImpl ?? fetch);
+    const researched = verified ?? await researchRecipeWithAI(client, trimmedPrompt);
 
-    const localAssessment = buildLocalRecipeInventoryAssessment(found.recipe, inventory);
-    const assessment = await assessRecipeAgainstInventoryWithAI(client, found.recipe, inventory, localAssessment);
-    const recipe = annotateRecipeWithAssessment(found.recipe, assessment, "VERIFIED");
-    const adaptedRecipe = assessment.adaptedRecipe
-      ? annotateRecipeWithAssessment(assessment.adaptedRecipe, assessment, "VERIFIED")
-      : null;
-
-    return {
-      recipe,
-      adaptedRecipe,
-      makeability: assessment.makeability,
-      missingIngredients: assessment.missingIngredients,
-      shoppingList: assessment.shoppingList,
-      substitutionOptions: assessment.substitutionOptions,
-      tasteImpact: assessment.tasteImpact,
-      sourceStatus: "VERIFIED",
-      sources: found.sources,
-      model: recipeModel,
-      status: "SUCCESS",
-    };
-  } catch {
-    return {
-      recipe: annotateRecipeWithAssessment(
+    if (!researched) {
+      const fallbackRecipe = annotateRecipeWithAssessment(
         {
           title: trimmedPrompt,
-          description: "Поиск рецепта завершился ошибкой.",
+          description: "Не удалось найти достаточно надежное описание рецепта. Попробуйте уточнить название или написать его латиницей.",
           savedRecipeId: null,
           matchType: null,
           ingredients: [],
           tools: [],
-          steps: ["Попробуйте повторить поиск чуть позже.", "Если ошибка повторится, уточните название рецепта."],
+          steps: ["Уточните название коктейля.", "Повторите поиск."],
           warnings: [],
           sources: [],
         },
@@ -1378,21 +1398,93 @@ export async function lookupRecipe(
           missingIngredients: [],
           shoppingList: [],
           substitutionOptions: [],
-          tasteImpact: tasteImpact("HIGH", "Рецепт не был найден и проверен."),
+          tasteImpact: tasteImpact("HIGH", "Research не нашел рецепт, который можно показать пользователю."),
           warnings: [],
         },
         "FAILED",
-      ),
+      );
+
+      return {
+        recipe: fallbackRecipe,
+        adaptedRecipe: null,
+        makeability: "CANNOT_MAKE",
+        missingIngredients: [],
+        shoppingList: [],
+        substitutionOptions: [],
+        alternatives: [],
+        tasteImpact: tasteImpact("HIGH", "Research не нашел рецепт, который можно показать пользователю."),
+        sourceStatus: "FAILED",
+        sources: [],
+        model: recipeModel,
+        status: "SUCCESS",
+        error: "Не нашел рецепт по этому запросу.",
+      };
+    }
+
+    const sourceStatus = verified ? "VERIFIED" as const : "UNVERIFIED" as const;
+    const localAssessment = buildLocalRecipeInventoryAssessment(researched.recipe, inventory);
+    const assessment = await assessRecipeAgainstInventoryWithAI(client, researched.recipe, inventory, localAssessment);
+    const alternatives = assessment.makeability === "AVAILABLE" || assessment.makeability === "AVAILABLE_WITH_SUBSTITUTIONS"
+      ? []
+      : await findLookupAlternatives(inventory, researched.recipe);
+    const recipe = annotateRecipeWithAssessment(researched.recipe, assessment, sourceStatus);
+    const adaptedRecipe = assessment.adaptedRecipe
+      ? annotateRecipeWithAssessment(assessment.adaptedRecipe, assessment, sourceStatus)
+      : null;
+
+    return {
+      recipe,
+      adaptedRecipe,
+      makeability: assessment.makeability,
+      missingIngredients: assessment.missingIngredients,
+      shoppingList: assessment.shoppingList,
+      substitutionOptions: assessment.substitutionOptions,
+      alternatives,
+      tasteImpact: assessment.tasteImpact,
+      sourceStatus,
+      sources: researched.sources,
+      model: recipeModel,
+      status: "SUCCESS",
+      error: sourceStatus === "UNVERIFIED" ? "Рецепт найден в research-режиме, но источник не прошел строгую проверку." : undefined,
+    };
+  } catch {
+    const fallbackRecipe = annotateRecipeWithAssessment(
+      {
+        title: trimmedPrompt,
+        description: "Поиск рецепта завершился ошибкой, но портал больше не прячет это за пустой карточкой.",
+        savedRecipeId: null,
+        matchType: null,
+        ingredients: [],
+        tools: [],
+        steps: ["Попробуйте повторить поиск.", "Если ошибка повторится, уточните название рецепта."],
+        warnings: [],
+        sources: [],
+      },
+      {
+        adaptedRecipe: null,
+        makeability: "CANNOT_MAKE",
+        missingIngredients: [],
+        shoppingList: [],
+        substitutionOptions: [],
+        tasteImpact: tasteImpact("HIGH", "Рецепт не удалось разобрать в этой попытке."),
+        warnings: [],
+      },
+      "FAILED",
+    );
+
+    return {
+      recipe: fallbackRecipe,
       adaptedRecipe: null,
       makeability: "CANNOT_MAKE",
       missingIngredients: [],
       shoppingList: [],
       substitutionOptions: [],
-      tasteImpact: tasteImpact("HIGH", "Рецепт не был найден и проверен."),
+      alternatives: [],
+      tasteImpact: tasteImpact("HIGH", "Рецепт не удалось разобрать в этой попытке."),
       sourceStatus: "FAILED",
       sources: [],
       model: recipeModel,
-      status: "FAILED",
+      status: "SUCCESS",
       error: "Не удалось стабильно найти и проверить рецепт.",
     };
   }
