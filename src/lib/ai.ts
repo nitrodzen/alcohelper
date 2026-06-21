@@ -43,6 +43,7 @@ const trustedRecipeSourceDomains = [
   "tuxedono2.com",
   "ru.inshaker.com",
   "scienceofdrinks.com",
+  "alcofan.com",
 ];
 
 const normalizedInventoryItemSchema = z.object({
@@ -380,6 +381,21 @@ function sanitizeSources(sources: SourceLink[] | undefined): SourceLink[] {
   return [...unique.values()];
 }
 
+export function extractUrlsFromText(value: string): SourceLink[] {
+  const urls = new Map<string, SourceLink>();
+  const matches = value.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
+
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[),.;\]]+$/g, "");
+    const parsed = sourceSchema.safeParse({ url: cleaned });
+    if (parsed.success && isHttpSourceUrl(parsed.data.url)) {
+      urls.set(parsed.data.url, parsed.data);
+    }
+  }
+
+  return [...urls.values()].slice(0, 8);
+}
+
 function isHttpSourceUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
@@ -387,6 +403,86 @@ function isHttpSourceUrl(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+function decodeDuckDuckGoRedirect(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl, "https://duckduckgo.com");
+    const redirected = url.searchParams.get("uddg");
+    return redirected ? decodeURIComponent(redirected) : url.href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function stripTrackingParams(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(utm_|yclid|ysclid|fbclid|gclid)/i.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
+    url.hash = "";
+    return url.href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function isLikelyRecipeResearchUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase();
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return false;
+    }
+    if (host.includes("google.") || host.includes("duckduckgo.") || host.includes("yandex.") || host.includes("bing.")) {
+      return false;
+    }
+    if (/\.(jpg|jpeg|png|gif|webp|svg|pdf|zip)$/i.test(url.pathname)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function buildRecipeSearchQueries(prompt: string): string[] {
+  const trimmed = prompt.trim();
+  const normalized = normalizeText(trimmed);
+  const queries = [
+    trimmed,
+    `${trimmed} рецепт коктейля`,
+    `${trimmed} cocktail recipe`,
+  ];
+
+  if (normalized.includes("джонни") || normalized.includes("сильверхенд") || normalized.includes("johnny silverhand") || normalized.includes("cyberpunk")) {
+    queries.unshift("Джонни Сильверхенд коктейль Cyberpunk 2077 рецепт");
+    queries.push("Johnny Silverhand cocktail Cyberpunk 2077 recipe");
+  }
+  if (normalized.includes("черный русский") || normalized.includes("black russian")) {
+    queries.unshift("Black Russian cocktail recipe");
+  }
+  if (normalized.includes("белый русский") || normalized.includes("white russian")) {
+    queries.unshift("White Russian cocktail recipe");
+  }
+
+  return [...new Set(queries.map((query) => query.trim()).filter(Boolean))].slice(0, 6);
+}
+
+function knownRecipeResearchSources(prompt: string): SourceLink[] {
+  const normalized = normalizeText(prompt);
+  if (normalized.includes("джонни") || normalized.includes("сильверхенд") || normalized.includes("johnny silverhand") || normalized.includes("cyberpunk")) {
+    return [
+      {
+        title: "Коктейли Джонни Сильверхенд и Джеки Уэллс из игры Cyberpunk 2077",
+        url: "https://alcofan.com/alkogolnye-koktejli-iz-igry-cyberpunk-2077.html",
+      },
+    ];
+  }
+  return [];
 }
 
 function isTrustedRecipeSourceUrl(rawUrl: string): boolean {
@@ -415,6 +511,47 @@ async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: Request
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function searchDuckDuckGoSources(prompt: string, fetchImpl: FetchLike): Promise<SourceLink[]> {
+  const results = new Map<string, SourceLink>();
+
+  for (const query of buildRecipeSearchQueries(prompt)) {
+    if (results.size >= 8) {
+      break;
+    }
+    try {
+      const response = await fetchWithTimeout(fetchImpl, `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+        method: "GET",
+        headers: {
+          "user-agent": "Mozilla/5.0 (compatible; AlcoHelper/1.0; +https://alco-helper.ru)",
+        },
+      });
+      if (!response.ok) {
+        continue;
+      }
+      const html = await response.text();
+      const anchors = [...html.matchAll(/<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)];
+      for (const match of anchors) {
+        const decodedUrl = stripTrackingParams(decodeDuckDuckGoRedirect(decodeHtmlEntities(match[1])));
+        if (!isLikelyRecipeResearchUrl(decodedUrl) || results.has(decodedUrl)) {
+          continue;
+        }
+        const title = decodeHtmlEntities(match[2].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+        const parsed = sourceSchema.safeParse({ url: decodedUrl, title: title || undefined });
+        if (parsed.success) {
+          results.set(parsed.data.url, parsed.data);
+        }
+        if (results.size >= 8) {
+          break;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [...results.values()];
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -469,6 +606,32 @@ async function fetchVerifiedSourceContent(source: SourceLink, fetchImpl: FetchLi
     }
     const sourceContent = extractSourceContent(await get.text());
     return sourceContent.length >= 80 ? { source, sourceContent } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchResearchSourceContent(source: SourceLink, fetchImpl: FetchLike): Promise<VerifiedSourceContent | null> {
+  if (!isHttpSourceUrl(source.url) || !isLikelyRecipeResearchUrl(source.url)) {
+    return null;
+  }
+
+  try {
+    const get = await fetchWithTimeout(fetchImpl, source.url, {
+      method: "GET",
+      headers: {
+        "user-agent": "Mozilla/5.0 (compatible; AlcoHelper/1.0; +https://alco-helper.ru)",
+      },
+    });
+    if (!(get.status >= 200 && get.status < 400)) {
+      return null;
+    }
+    const contentType = get.headers.get("content-type") ?? "";
+    if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml") && !contentType.includes("application/json")) {
+      return null;
+    }
+    const sourceContent = extractSourceContent(await get.text());
+    return sourceContent.length >= 160 ? { source, sourceContent } : null;
   } catch {
     return null;
   }
@@ -1107,7 +1270,9 @@ function normalizeAiAvailabilityChecks(parsed: z.infer<typeof aiAvailabilityChec
   };
 }
 
-async function searchRecipeSourceCandidates(client: OpenAI, prompt: string): Promise<SourceLink[]> {
+async function searchRecipeSourceCandidates(client: OpenAI, prompt: string, fetchImpl: FetchLike): Promise<SourceLink[]> {
+  const initialSources = [...extractUrlsFromText(prompt), ...knownRecipeResearchSources(prompt), ...await searchDuckDuckGoSources(prompt, fetchImpl)];
+
   try {
     const response = await client.responses.parse({
       model: recipeModel,
@@ -1130,9 +1295,9 @@ async function searchRecipeSourceCandidates(client: OpenAI, prompt: string): Pro
     });
 
     const parsedSources = response.output_parsed?.sources ?? [];
-    return limitSources([...parsedSources, ...extractWebSources(response)]);
+    return limitSources([...initialSources, ...parsedSources, ...extractWebSources(response)]);
   } catch {
-    return [];
+    return limitSources(initialSources);
   }
 }
 
@@ -1190,7 +1355,7 @@ async function findVerifiedCanonicalRecipe(
   inventory: InventoryForAI[],
   fetchImpl: FetchLike,
 ): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
-  const candidates = await searchRecipeSourceCandidates(client, prompt);
+  const candidates = await searchRecipeSourceCandidates(client, prompt, fetchImpl);
   const cache = new Map<string, Promise<VerifiedSourceContent | null>>();
   const verifiedSources = await verifySources(candidates, fetchImpl, cache);
 
@@ -1222,7 +1387,75 @@ async function findVerifiedCanonicalRecipe(
   return null;
 }
 
-async function researchRecipeWithAI(client: OpenAI, prompt: string): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
+async function parseResearchRecipeFromFetchedSources(
+  client: OpenAI,
+  prompt: string,
+  sources: VerifiedSourceContent[],
+): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
+  if (sources.length === 0) {
+    return null;
+  }
+
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      text: {
+        format: zodTextFormat(recipeResearchSchema, "fetched_cocktail_recipe_research"),
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "Ты извлекаешь рецепт коктейля из уже скачанных страниц. Выбери страницу и фрагмент, которые лучше всего соответствуют запросу. Верни оригинальное название, короткое описание/историю, состав с пропорциями и шаги. Если на странице несколько вариантов одного коктейля, выбери основной/классический и упомяни важную альтернативу в description или warnings. Не выдумывай ингредиенты вне sourceContent.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            prompt,
+            pages: sources.map((source, index) => ({
+              index: index + 1,
+              source: source.source,
+              sourceContent: source.sourceContent.slice(0, 18000),
+            })),
+          }),
+        },
+      ],
+    });
+
+    if (!response.output_parsed) {
+      return null;
+    }
+
+    const sourceLinks = limitSources([...sanitizeSources(response.output_parsed.sources), ...sources.map((source) => source.source)]);
+    const normalized = normalizeAiGeneratedRecipes({ recipes: [response.output_parsed.recipe] }).recipes[0];
+    const recipe = generatedRecipeSchema.parse({
+      ...normalized,
+      description: response.output_parsed.researchSummary || normalized.description,
+      savedRecipeId: null,
+      matchType: null,
+      sources: sourceLinks,
+      sourceStatus: "UNVERIFIED",
+    });
+
+    return { recipe, sources: sourceLinks };
+  } catch {
+    return null;
+  }
+}
+
+async function researchRecipeWithAI(client: OpenAI, prompt: string, fetchImpl: FetchLike): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
+  const candidates = await searchRecipeSourceCandidates(client, prompt, fetchImpl);
+  const fetched = (
+    await Promise.all(
+      candidates.slice(0, 8).map((source) => fetchResearchSourceContent(source, fetchImpl)),
+    )
+  ).filter((source): source is VerifiedSourceContent => source !== null);
+  const fromFetched = await parseResearchRecipeFromFetchedSources(client, prompt, fetched.slice(0, 4));
+
+  if (fromFetched) {
+    return fromFetched;
+  }
+
   try {
     const response = await client.responses.parse({
       model: recipeModel,
@@ -1376,8 +1609,9 @@ export async function lookupRecipe(
   }
 
   try {
-    const verified = await findVerifiedCanonicalRecipe(client, trimmedPrompt, inventory, options.fetchImpl ?? fetch);
-    const researched = verified ?? await researchRecipeWithAI(client, trimmedPrompt);
+    const fetchImpl = options.fetchImpl ?? fetch;
+    const verified = await findVerifiedCanonicalRecipe(client, trimmedPrompt, inventory, fetchImpl);
+    const researched = verified ?? await researchRecipeWithAI(client, trimmedPrompt, fetchImpl);
 
     if (!researched) {
       const fallbackRecipe = annotateRecipeWithAssessment(

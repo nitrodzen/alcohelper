@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildAvailabilityCheckInstructions,
   buildLocalRecipeInventoryAssessment,
+  buildRecipeSearchQueries,
+  extractUrlsFromText,
   buildRecipeGenerationInstructions,
   buildRecipeGenerationPayload,
   createNormalizedInventoryPatch,
@@ -96,6 +98,20 @@ describe("AI normalization helpers", () => {
 });
 
 describe("recipe generation prompt helpers", () => {
+  it("extracts direct recipe URLs from user text", () => {
+    expect(
+      extractUrlsFromText("вот рецепт https://alcofan.com/alkogolnye-koktejli-iz-igry-cyberpunk-2077.html?ysclid=test."),
+    ).toContainEqual({ url: "https://alcofan.com/alkogolnye-koktejli-iz-igry-cyberpunk-2077.html?ysclid=test" });
+  });
+
+  it("builds broader search queries for pop-culture cocktail names", () => {
+    const queries = buildRecipeSearchQueries("джонни сильверхенд");
+
+    expect(queries).toContain("Джонни Сильверхенд коктейль Cyberpunk 2077 рецепт");
+    expect(queries).toContain("Johnny Silverhand cocktail Cyberpunk 2077 recipe");
+    expect(queries.some((query) => query.includes("cocktail recipe"))).toBe(true);
+  });
+
   it("passes the user comment and full inventory without changing item data", () => {
     const payload = buildRecipeGenerationPayload([martiniWithBadAutofields], "хочу Б-52 или похожий шот", [
       {

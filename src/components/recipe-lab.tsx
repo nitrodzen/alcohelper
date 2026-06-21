@@ -246,26 +246,40 @@ export function RecipeLab() {
   const groupedRecipes = useMemo(() => groupRecipes(generation?.recipes ?? []), [generation]);
   const inventoryReady = inventory.some((item) => item.kind !== "TOOL");
 
-  async function lookup() {
-    setLoadingMode("lookup");
+  async function runLookup(prompt: string, options: { switchMode?: boolean; loading?: boolean } = {}) {
+    if (options.switchMode) {
+      setMode("lookup");
+    }
+    if (options.loading ?? true) {
+      setLoadingMode("lookup");
+    }
     setLookupResult(null);
     setMessage("Ищу страницу рецепта и сверяю с инвентарем.");
 
     const response = await fetch("/api/recipes/lookup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: lookupPrompt }),
+      body: JSON.stringify({ prompt }),
     });
     const data = await response.json();
-    setLoadingMode(null);
+    if (options.loading ?? true) {
+      setLoadingMode(null);
+    }
 
     if (!response.ok && !data.recipe) {
       setMessage(data.error ?? "Не удалось найти рецепт.");
-      return;
+      return null;
     }
 
     setLookupResult(data);
-    setMessage(response.ok ? "" : data.error ?? "Источник не прошел проверку.");
+    setMessage(response.ok && !data.error ? "" : data.error ?? "Показываю research-результат без строгой проверки источника.");
+    return data as RecipeLookupResult;
+  }
+
+  async function lookup() {
+    setLoadingMode("lookup");
+    await runLookup(lookupPrompt, { loading: false });
+    setLoadingMode(null);
   }
 
   async function generateDiscover() {
@@ -283,7 +297,12 @@ export function RecipeLab() {
     setLoadingMode(null);
 
     if (!response.ok) {
-      setMessage(data.error ?? "Не удалось подобрать коктейли.");
+      if (discoverPrompt.trim()) {
+        setMessage("Готовых вариантов из инвентаря не нашел. Показываю research по запросу.");
+        await runLookup(discoverPrompt, { loading: false });
+      } else {
+        setMessage(data.error ?? "Не удалось подобрать коктейли.");
+      }
       return;
     }
 
@@ -301,7 +320,12 @@ export function RecipeLab() {
     setGeneration(nextGeneration);
     saveRecipeGeneration(nextGeneration);
     setInventory(nextGeneration.inventorySnapshot);
-    setMessage(nextGeneration.recipes.length ? "" : "Сейчас не нашел подтвержденные варианты под текущий инвентарь.");
+    if (nextGeneration.recipes.length === 0 && discoverPrompt.trim()) {
+      setMessage("Сейчас не нашел готовые варианты под инвентарь. Показываю research по запросу.");
+      await runLookup(discoverPrompt, { loading: false });
+    } else {
+      setMessage(nextGeneration.recipes.length ? "" : "Сейчас не нашел подтвержденные варианты под текущий инвентарь.");
+    }
   }
 
   function resetCurrentMode() {
@@ -518,6 +542,14 @@ export function RecipeLab() {
               {renderRecipeGroup("Можно с малой заменой", groupedRecipes.substitutions)}
               {renderRecipeGroup("Не рекомендую из-за вкуса", groupedRecipes.notRecommended)}
             </>
+          ) : null}
+          {lookupResult ? (
+            <section className="result-section">
+              <div className="section-heading compact">
+                <h2>Research по запросу</h2>
+              </div>
+              {renderLookupResult()}
+            </section>
           ) : null}
         </section>
       )}
