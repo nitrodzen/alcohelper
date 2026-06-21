@@ -12,10 +12,19 @@ import {
 } from "@/lib/inventory";
 import {
   filterRecipesByInventory,
+  generatedRecipeSchema,
   generatedRecipesSchema,
+  makeabilityStatusSchema,
+  missingIngredientSchema,
+  shoppingListItemSchema,
+  substitutionOptionSchema,
+  tasteImpactSchema,
   type AvailabilityCheck,
   type GeneratedRecipe,
   type GeneratedRecipes,
+  type MakeabilityStatus,
+  type SubstitutionOption,
+  type TasteImpact,
 } from "@/lib/recipe";
 
 const inventoryModel = process.env.OPENAI_MODEL || "gpt-5.4-mini";
@@ -122,6 +131,11 @@ const aiAvailabilityChecksSchema = z.object({
   checks: z.array(aiAvailabilityCheckSchema).max(100),
 });
 
+const recipeSourceCandidatesSchema = z.object({
+  canonicalName: z.string().trim().min(1).max(120),
+  sources: z.array(sourceSchema).min(1).max(8),
+});
+
 const sourceContentValidationSchema = z.object({
   verdict: z.enum(["VALID_EXACT", "VALID_SUBSTITUTION", "INVALID_SOURCE_MISMATCH", "INVALID_INGREDIENT_MISMATCH", "INVALID_NO_RECIPE_CONTENT"]),
   reason: z.string().trim().min(1).max(600),
@@ -137,6 +151,16 @@ const sourceContentValidationSchema = z.object({
     )
     .max(16)
     .default([]),
+});
+
+const recipeLookupAssessmentSchema = z.object({
+  makeability: makeabilityStatusSchema,
+  missingIngredients: z.array(missingIngredientSchema).max(24).default([]),
+  shoppingList: z.array(shoppingListItemSchema).max(24).default([]),
+  substitutionOptions: z.array(substitutionOptionSchema).max(20).default([]),
+  tasteImpact: tasteImpactSchema,
+  warnings: z.array(z.string().trim().min(1).max(300)).max(8).default([]),
+  adaptedRecipe: aiGeneratedRecipeSchema.nullable(),
 });
 
 export type NormalizedInventoryUpdate = z.infer<typeof normalizedInventoryBatchSchema>["items"][number];
@@ -172,6 +196,25 @@ type RecipeGenerationResult = {
   sources: SourceLink[];
   status: "SUCCESS" | "FAILED";
   error?: string;
+};
+export type MissingIngredient = z.infer<typeof missingIngredientSchema>;
+export type ShoppingListItem = z.infer<typeof shoppingListItemSchema>;
+export type RecipeLookupResult = {
+  recipe: GeneratedRecipe;
+  adaptedRecipe: GeneratedRecipe | null;
+  makeability: MakeabilityStatus;
+  missingIngredients: MissingIngredient[];
+  shoppingList: ShoppingListItem[];
+  substitutionOptions: SubstitutionOption[];
+  tasteImpact: TasteImpact;
+  sourceStatus: "VERIFIED" | "FAILED";
+  sources: SourceLink[];
+  model: string;
+  status: "SUCCESS" | "FAILED";
+  error?: string;
+};
+export type RecipeInventoryAssessment = Omit<RecipeLookupResult, "recipe" | "sourceStatus" | "sources" | "model" | "status" | "error"> & {
+  warnings: string[];
 };
 type SourceContentValidationResult = z.infer<typeof sourceContentValidationSchema>;
 type SourceContentValidator = (input: {
@@ -668,25 +711,32 @@ function buildSavedRecipesPayload(savedRecipes: SavedRecipeForAI[]) {
   }));
 }
 
-function inventoryRole(item: Pick<InventoryForAI, "kind" | "name" | "category" | "description" | "aliases">): string | null {
-  const text = normalizeText([item.name, item.category, item.description, ...item.aliases].join(" "));
+function ingredientRoleFromText(value: string): string | null {
+  const text = normalizeText(value);
 
-  if (item.kind === "TOOL") {
-    return null;
-  }
   if (text.match(/white rum|dark rum|rum|ром/)) return "rum";
   if (text.match(/vodka|водк/)) return "vodka";
   if (text.match(/gin|джин/)) return "gin";
   if (text.match(/tequila|текил/)) return "tequila";
   if (text.match(/whiskey|whisky|bourbon|виски|бурбон/)) return "whiskey";
-  if (text.match(/coffee|кофе|chocolate|cream|сливоч|шоколад|liqueur|ликер|ликер/)) return "dessert-liqueur";
-  if (text.match(/orange|triple sec|cointreau|апельсин/)) return "orange-liqueur";
+  if (text.match(/kahlua|coffee|кофе|калуа/)) return "coffee-liqueur";
+  if (text.match(/orange|triple sec|cointreau|curacao|curaçao|апельсин/)) return "orange-liqueur";
+  if (text.match(/chocolate|cream|сливоч|шоколад|baileys|бейлис/)) return "dessert-liqueur";
+  if (text.match(/vermouth|martini|вермут/)) return "vermouth";
+  if (text.match(/bitters|angostura|bitter|биттер|ангостур/)) return "bitter";
   if (text.match(/lime|lemon|citrus|лайм|лимон|цитрус/)) return "citrus";
   if (text.match(/syrup|сироп/)) return "syrup";
   if (text.match(/cola|tonic|soda|sprite|газ|тоник|кола/)) return "sparkling-mixer";
   if (text.match(/juice|сок/)) return "juice";
 
   return null;
+}
+
+function inventoryRole(item: Pick<InventoryForAI, "kind" | "name" | "category" | "description" | "aliases">): string | null {
+  if (item.kind === "TOOL") {
+    return null;
+  }
+  return ingredientRoleFromText([item.name, item.category, item.description, ...item.aliases].join(" "));
 }
 
 function buildSubstitutionHints(inventory: InventoryForAI[]) {
@@ -703,6 +753,318 @@ function buildSubstitutionHints(inventory: InventoryForAI[]) {
   }
 
   return hints.slice(0, 30);
+}
+
+function tasteImpact(level: TasteImpact["level"], summary: string): TasteImpact {
+  return { level, summary };
+}
+
+function maxTasteImpact(impacts: TasteImpact[]): TasteImpact {
+  if (impacts.length === 0) {
+    return tasteImpact("NONE", "Оригинальный вкус сохраняется: замены не нужны.");
+  }
+
+  const order: Record<TasteImpact["level"], number> = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3 };
+  return impacts.reduce((max, current) => (order[current.level] > order[max.level] ? current : max));
+}
+
+function conservativeRoleCompatibility(originalRole: string | null, substituteRole: string | null): TasteImpact | null {
+  if (!originalRole || !substituteRole) {
+    return null;
+  }
+  if (originalRole === substituteRole) {
+    return tasteImpact("LOW", "Замена остается в той же вкусовой роли, вкус должен измениться слабо.");
+  }
+  if (originalRole === "coffee-liqueur" && substituteRole === "dessert-liqueur") {
+    return tasteImpact("MEDIUM", "Кофейная горечь уйдет в шоколадно-сливочный профиль; это заметная, но понятная десертная замена.");
+  }
+  if (originalRole === "dessert-liqueur" && substituteRole === "coffee-liqueur") {
+    return tasteImpact("MEDIUM", "Сладкий десертный профиль станет более кофейным и горьким, но роль ликера сохраняется.");
+  }
+  if (originalRole === "citrus" && substituteRole === "juice") {
+    return tasteImpact("MEDIUM", "Кислотность станет мягче и слаще, поэтому баланс заметно изменится.");
+  }
+  return null;
+}
+
+function findConservativeSubstitution(
+  missing: MissingIngredient,
+  inventory: InventoryForAI[],
+): SubstitutionOption | null {
+  if (missing.kind === "TOOL") {
+    return null;
+  }
+
+  const originalRole = ingredientRoleFromText(missing.name);
+  const candidates = inventory
+    .filter((item) => item.kind !== "TOOL")
+    .map((item) => ({
+      item,
+      impact: conservativeRoleCompatibility(originalRole, inventoryRole(item)),
+    }))
+    .filter((candidate): candidate is { item: InventoryForAI; impact: TasteImpact } => Boolean(candidate.impact));
+
+  const candidate = candidates.sort((a, b) => {
+    const order: Record<TasteImpact["level"], number> = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3 };
+    return order[a.impact.level] - order[b.impact.level];
+  })[0];
+
+  if (!candidate) {
+    return null;
+  }
+
+  return {
+    original: missing.name,
+    originalAmount: missing.amount,
+    substitute: candidate.item.name,
+    substituteInventoryItemId: candidate.item.id,
+    note: candidate.impact.summary,
+    tasteImpact: candidate.impact,
+    recommended: candidate.impact.level !== "HIGH",
+  };
+}
+
+function applySubstitutionsToRecipe(recipe: GeneratedRecipe, substitutions: SubstitutionOption[]): GeneratedRecipe {
+  const substitutionsByOriginal = new Map(substitutions.map((substitution) => [normalizeText(substitution.original), substitution]));
+  const warnings = [
+    ...recipe.warnings,
+    ...substitutions.map((substitution) => `Замена: ${substitution.original} -> ${substitution.substitute}. ${substitution.note ?? substitution.tasteImpact.summary}`),
+  ].slice(0, 6);
+
+  return {
+    ...recipe,
+    matchType: "SUBSTITUTION",
+    ingredients: recipe.ingredients.map((ingredient) => {
+      const substitution = substitutionsByOriginal.get(normalizeText(ingredient.name));
+      if (!substitution) {
+        return ingredient;
+      }
+      return {
+        ...ingredient,
+        name: substitution.substitute,
+        inventoryItemId: substitution.substituteInventoryItemId ?? ingredient.inventoryItemId ?? null,
+      };
+    }),
+    warnings,
+  };
+}
+
+export function buildLocalRecipeInventoryAssessment(recipe: GeneratedRecipe, inventory: InventoryForAI[]): RecipeInventoryAssessment {
+  const missingIngredients = recipe.ingredients
+    .filter((ingredient) => !ingredient.optional && !hasMatchingInventoryItem(ingredient.name, inventory, ["ALCOHOL", "INGREDIENT"]))
+    .map((ingredient) => ({
+      name: ingredient.name,
+      amount: ingredient.amount,
+      kind: "INGREDIENT" as const,
+    }));
+  const missingTools = recipe.tools
+    .filter((tool) => !tool.optional && !hasMatchingInventoryItem(tool.name, inventory, ["TOOL"]))
+    .map((tool) => ({
+      name: tool.name,
+      kind: "TOOL" as const,
+    }));
+  const missing = [...missingIngredients, ...missingTools];
+  const shoppingList = missing.map((item) => ({
+    name: item.name,
+    amount: "amount" in item ? item.amount : undefined,
+    note: item.kind === "TOOL" ? "Нужен инструмент для корректной подачи/приготовления." : "Нужен для оригинального рецепта.",
+  }));
+
+  if (missing.length === 0) {
+    return {
+      adaptedRecipe: null,
+      makeability: "AVAILABLE",
+      missingIngredients: [],
+      shoppingList: [],
+      substitutionOptions: [],
+      tasteImpact: tasteImpact("NONE", "Все обязательные компоненты есть в инвентаре."),
+      warnings: [],
+    };
+  }
+
+  const substitutions = missingIngredients
+    .map((item) => findConservativeSubstitution(item, inventory))
+    .filter((item): item is SubstitutionOption => item !== null);
+  const substitutedOriginals = new Set(substitutions.filter((item) => item.recommended && item.tasteImpact.level !== "HIGH").map((item) => normalizeText(item.original)));
+  const allIngredientGapsCovered = missingIngredients.every((item) => substitutedOriginals.has(normalizeText(item.name)));
+  const hasMissingTools = missingTools.length > 0;
+
+  if (!hasMissingTools && allIngredientGapsCovered && substitutions.length > 0) {
+    const adaptedRecipe = applySubstitutionsToRecipe(recipe, substitutions);
+    const impact = maxTasteImpact(substitutions.map((substitution) => substitution.tasteImpact));
+    return {
+      adaptedRecipe,
+      makeability: impact.level === "HIGH" ? "NOT_RECOMMENDED" : "AVAILABLE_WITH_SUBSTITUTIONS",
+      missingIngredients: missing,
+      shoppingList,
+      substitutionOptions: substitutions,
+      tasteImpact: impact,
+      warnings: adaptedRecipe.warnings,
+    };
+  }
+
+  return {
+    adaptedRecipe: null,
+    makeability: "CANNOT_MAKE",
+    missingIngredients: missing,
+    shoppingList,
+    substitutionOptions: substitutions,
+    tasteImpact: tasteImpact("HIGH", "Без недостающих компонентов или надежных близких замен рецепт собрать честно нельзя."),
+    warnings: ["Нет достаточно близкой замены для всех обязательных компонентов."],
+  };
+}
+
+function normalizeAiAssessment(
+  recipe: GeneratedRecipe,
+  inventory: InventoryForAI[],
+  local: RecipeInventoryAssessment,
+  parsed: z.infer<typeof recipeLookupAssessmentSchema>,
+): RecipeInventoryAssessment {
+  if (local.makeability === "AVAILABLE") {
+    return local;
+  }
+
+  const inventoryByName = new Map(inventory.map((item) => [normalizeText(item.name), item]));
+  const missingIngredientKeys = new Set(local.missingIngredients.filter((item) => item.kind !== "TOOL").map((item) => normalizeText(item.name)));
+  const validSubstitutions: SubstitutionOption[] = [];
+  for (const substitution of parsed.substitutionOptions) {
+    const item = inventoryByName.get(normalizeText(substitution.substitute));
+    if (!item || !missingIngredientKeys.has(normalizeText(substitution.original))) {
+      continue;
+    }
+    validSubstitutions.push({
+      ...substitution,
+      substitute: item.name,
+      substituteInventoryItemId: item.id,
+    });
+  }
+  const recommendedSubstitutions = validSubstitutions.filter((item) => item.recommended && item.tasteImpact.level !== "HIGH");
+  const highImpactSubstitutions = validSubstitutions.filter((item) => !item.recommended || item.tasteImpact.level === "HIGH");
+  const recommendedOriginals = new Set(recommendedSubstitutions.map((item) => normalizeText(item.original)));
+  const missingIngredients = local.missingIngredients.filter((item) => item.kind !== "TOOL");
+  const hasMissingTools = local.missingIngredients.some((item) => item.kind === "TOOL");
+  const allCovered = missingIngredients.length > 0 && missingIngredients.every((item) => recommendedOriginals.has(normalizeText(item.name)));
+
+  if (hasMissingTools) {
+    return {
+      ...local,
+      substitutionOptions: validSubstitutions.length ? validSubstitutions : local.substitutionOptions,
+      warnings: [...local.warnings, ...parsed.warnings].slice(0, 8),
+    };
+  }
+
+  if (highImpactSubstitutions.length > 0 && !allCovered) {
+    return {
+      adaptedRecipe: null,
+      makeability: "NOT_RECOMMENDED",
+      missingIngredients: local.missingIngredients,
+      shoppingList: local.shoppingList,
+      substitutionOptions: validSubstitutions,
+      tasteImpact: maxTasteImpact(highImpactSubstitutions.map((substitution) => substitution.tasteImpact)),
+      warnings: parsed.warnings.length ? parsed.warnings : ["Есть только замена с сильным сдвигом вкуса, такой вариант не рекомендую."],
+    };
+  }
+
+  if (allCovered) {
+    const adaptedRecipe = parsed.adaptedRecipe ? normalizeAiGeneratedRecipes({ recipes: [parsed.adaptedRecipe] }).recipes[0] : applySubstitutionsToRecipe(recipe, recommendedSubstitutions);
+    const impact = maxTasteImpact(recommendedSubstitutions.map((substitution) => substitution.tasteImpact));
+    return {
+      adaptedRecipe: {
+        ...adaptedRecipe,
+        makeability: "AVAILABLE_WITH_SUBSTITUTIONS",
+        missingIngredients: local.missingIngredients,
+        shoppingList: local.shoppingList,
+        substitutionOptions: recommendedSubstitutions,
+        tasteImpact: impact,
+        sourceStatus: "VERIFIED",
+        sources: recipe.sources ?? [],
+      },
+      makeability: "AVAILABLE_WITH_SUBSTITUTIONS",
+      missingIngredients: local.missingIngredients,
+      shoppingList: local.shoppingList,
+      substitutionOptions: recommendedSubstitutions,
+      tasteImpact: impact,
+      warnings: parsed.warnings.length ? parsed.warnings : adaptedRecipe.warnings,
+    };
+  }
+
+  return {
+    ...local,
+    substitutionOptions: validSubstitutions.length ? validSubstitutions : local.substitutionOptions,
+    warnings: parsed.warnings.length ? parsed.warnings : local.warnings,
+  };
+}
+
+async function assessRecipeAgainstInventoryWithAI(
+  client: OpenAI,
+  recipe: GeneratedRecipe,
+  inventory: InventoryForAI[],
+  local: RecipeInventoryAssessment,
+): Promise<RecipeInventoryAssessment> {
+  if (local.makeability === "AVAILABLE") {
+    return local;
+  }
+
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      text: {
+        format: zodTextFormat(recipeLookupAssessmentSchema, "recipe_inventory_assessment"),
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "Ты шеф-бармен и проверяешь конкретный подтвержденный рецепт против inventory. Политика conservative: хорошая замена сохраняет роль и основной вкус; если замена сильно меняет вкус, верни NOT_RECOMMENDED, а не AVAILABLE_WITH_SUBSTITUTIONS. Инструменты не заменяй случайными предметами. substitute всегда должен быть точным name из inventory. Если нельзя покрыть все обязательные ингредиенты близкими заменами, верни CANNOT_MAKE.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            recipe,
+            inventory: buildInventoryPayload(inventory),
+            localAssessment: local,
+            substitutionHints: buildSubstitutionHints(inventory),
+          }),
+        },
+      ],
+    });
+
+    return response.output_parsed ? normalizeAiAssessment(recipe, inventory, local, response.output_parsed) : local;
+  } catch {
+    return local;
+  }
+}
+
+function annotateRecipeWithAssessment(recipe: GeneratedRecipe, assessment: RecipeInventoryAssessment, sourceStatus: "VERIFIED" | "UNVERIFIED" | "FAILED" = "VERIFIED"): GeneratedRecipe {
+  return {
+    ...recipe,
+    makeability: assessment.makeability,
+    missingIngredients: assessment.missingIngredients,
+    shoppingList: assessment.shoppingList,
+    substitutionOptions: assessment.substitutionOptions,
+    tasteImpact: assessment.tasteImpact,
+    sourceStatus,
+  };
+}
+
+function annotateDiscoveredRecipe(recipe: GeneratedRecipe, inventory: InventoryForAI[]): GeneratedRecipe {
+  const local = buildLocalRecipeInventoryAssessment(recipe, inventory);
+
+  if (local.makeability !== "AVAILABLE") {
+    return annotateRecipeWithAssessment(recipe, local, recipe.sources?.length ? "VERIFIED" : "UNVERIFIED");
+  }
+
+  const isSubstitution = recipe.matchType === "SUBSTITUTION";
+  const assessment: RecipeInventoryAssessment = {
+    ...local,
+    makeability: isSubstitution ? "AVAILABLE_WITH_SUBSTITUTIONS" : "AVAILABLE",
+    tasteImpact: isSubstitution
+      ? tasteImpact("LOW", "Рецепт уже адаптирован под имеющийся инвентарь; замена должна быть небольшой.")
+      : local.tasteImpact,
+    warnings: recipe.warnings,
+  };
+
+  return annotateRecipeWithAssessment(recipe, assessment, recipe.sources?.length ? "VERIFIED" : "UNVERIFIED");
 }
 
 function normalizeAiGeneratedRecipes(parsed: z.infer<typeof aiGeneratedRecipesSchema>): GeneratedRecipes {
@@ -736,6 +1098,304 @@ function normalizeAiAvailabilityChecks(parsed: z.infer<typeof aiAvailabilityChec
       ),
     })),
   };
+}
+
+async function searchRecipeSourceCandidates(client: OpenAI, prompt: string): Promise<SourceLink[]> {
+  const response = await client.responses.parse({
+    model: recipeModel,
+    tools: webSearchTool,
+    include: ["web_search_call.action.sources"],
+    text: {
+      format: zodTextFormat(recipeSourceCandidatesSchema, "recipe_source_candidates"),
+    },
+    input: [
+      {
+        role: "system",
+        content:
+          "Найди прямые страницы существующего коктейльного рецепта по запросу пользователя. Верни только реальные страницы рецептов, не главные страницы, не поиск, не категории. Приоритет: Difford's Guide, Liquor.com, Punch, Imbibe, IBA, Tuxedo No. 2, Inshaker, Science of Drinks. Если рецепт из поп-культуры, ищи человеческие опубликованные рецепты, а не выдумывай состав.",
+      },
+      {
+        role: "user",
+        content: JSON.stringify({ prompt }),
+      },
+    ],
+  });
+
+  const parsedSources = response.output_parsed?.sources ?? [];
+  return limitSources([...parsedSources, ...extractWebSources(response)]);
+}
+
+async function parseCanonicalRecipeFromSource(
+  client: OpenAI,
+  prompt: string,
+  source: SourceLink,
+  sourceContent: string,
+): Promise<GeneratedRecipe | null> {
+  try {
+    const response = await client.responses.parse({
+      model: recipeModel,
+      text: {
+        format: zodTextFormat(aiGeneratedRecipeSchema, "canonical_cocktail_recipe"),
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "Извлеки из sourceContent канонический рецепт коктейля, который соответствует запросу. Не адаптируй под inventory, не заменяй ингредиенты и не добавляй покупки. Если страница содержит рецепт, верни его как JSON. ingredient.name должен быть названием оригинального ингредиента из источника. sources должен содержать только переданный source.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            prompt,
+            source,
+            sourceContent,
+          }),
+        },
+      ],
+    });
+
+    if (!response.output_parsed) {
+      return null;
+    }
+
+    const recipe = normalizeAiGeneratedRecipes({ recipes: [response.output_parsed] }).recipes[0];
+    const parsed = generatedRecipeSchema.safeParse({
+      ...recipe,
+      savedRecipeId: null,
+      matchType: null,
+      sources: [source],
+      sourceStatus: "VERIFIED",
+    });
+
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function findVerifiedCanonicalRecipe(
+  client: OpenAI,
+  prompt: string,
+  inventory: InventoryForAI[],
+  fetchImpl: FetchLike,
+): Promise<{ recipe: GeneratedRecipe; sources: SourceLink[] } | null> {
+  const candidates = await searchRecipeSourceCandidates(client, prompt);
+  const cache = new Map<string, Promise<VerifiedSourceContent | null>>();
+  const verifiedSources = await verifySources(candidates, fetchImpl, cache);
+
+  for (const verified of verifiedSources) {
+    const recipe = await parseCanonicalRecipeFromSource(client, prompt, verified.source, verified.sourceContent);
+    if (!recipe) {
+      continue;
+    }
+
+    const validation = await validateRecipeSourceContentWithAI({
+      recipe,
+      source: verified.source,
+      sourceContent: verified.sourceContent,
+      inventory,
+    });
+
+    if (isValidSourceContentValidation(validation)) {
+      return {
+        recipe: {
+          ...recipe,
+          sources: [verified.source],
+          sourceStatus: "VERIFIED",
+        },
+        sources: [verified.source],
+      };
+    }
+  }
+
+  return null;
+}
+
+export async function lookupRecipe(
+  inventory: InventoryForAI[],
+  prompt = "",
+  options: { fetchImpl?: FetchLike } = {},
+): Promise<RecipeLookupResult> {
+  const client = getClient();
+  const trimmedPrompt = prompt.trim();
+
+  if (!trimmedPrompt) {
+    return {
+      recipe: annotateRecipeWithAssessment(
+        {
+          title: "Пустой запрос",
+          description: "Введите название коктейля, чтобы найти подтвержденный рецепт.",
+          savedRecipeId: null,
+          matchType: null,
+          ingredients: [],
+          tools: [],
+          steps: ["Введите название коктейля.", "Повторите поиск."],
+          warnings: [],
+          sources: [],
+        },
+        {
+          adaptedRecipe: null,
+          makeability: "CANNOT_MAKE",
+          missingIngredients: [],
+          shoppingList: [],
+          substitutionOptions: [],
+          tasteImpact: tasteImpact("HIGH", "Без названия рецепта нечего проверять."),
+          warnings: [],
+        },
+        "FAILED",
+      ),
+      adaptedRecipe: null,
+      makeability: "CANNOT_MAKE",
+      missingIngredients: [],
+      shoppingList: [],
+      substitutionOptions: [],
+      tasteImpact: tasteImpact("HIGH", "Без названия рецепта нечего проверять."),
+      sourceStatus: "FAILED",
+      sources: [],
+      model: "server-validation",
+      status: "FAILED",
+      error: "Введите название коктейля.",
+    };
+  }
+
+  if (!client) {
+    return {
+      recipe: annotateRecipeWithAssessment(
+        {
+          title: trimmedPrompt,
+          description: "OPENAI_API_KEY не задан, поэтому нельзя найти и проверить источник рецепта.",
+          savedRecipeId: null,
+          matchType: null,
+          ingredients: [],
+          tools: [],
+          steps: ["Настройте OPENAI_API_KEY.", "Повторите поиск."],
+          warnings: [],
+          sources: [],
+        },
+        {
+          adaptedRecipe: null,
+          makeability: "CANNOT_MAKE",
+          missingIngredients: [],
+          shoppingList: [],
+          substitutionOptions: [],
+          tasteImpact: tasteImpact("HIGH", "Источник рецепта не был найден и проверен."),
+          warnings: [],
+        },
+        "FAILED",
+      ),
+      adaptedRecipe: null,
+      makeability: "CANNOT_MAKE",
+      missingIngredients: [],
+      shoppingList: [],
+      substitutionOptions: [],
+      tasteImpact: tasteImpact("HIGH", "Источник рецепта не был найден и проверен."),
+      sourceStatus: "FAILED",
+      sources: [],
+      model: "local-demo",
+      status: "FAILED",
+      error: "OPENAI_API_KEY не задан, поэтому нельзя найти подтвержденный рецепт с рабочим источником.",
+    };
+  }
+
+  try {
+    const found = await findVerifiedCanonicalRecipe(client, trimmedPrompt, inventory, options.fetchImpl ?? fetch);
+    if (!found) {
+      return {
+        recipe: annotateRecipeWithAssessment(
+          {
+            title: trimmedPrompt,
+            description: "Не удалось найти подтвержденную страницу рецепта в доверенных источниках.",
+            savedRecipeId: null,
+            matchType: null,
+            ingredients: [],
+            tools: [],
+            steps: ["Попробуйте уточнить название коктейля.", "Например: Black Russian или Johnny Silverhand cocktail."],
+            warnings: [],
+            sources: [],
+          },
+          {
+            adaptedRecipe: null,
+            makeability: "CANNOT_MAKE",
+            missingIngredients: [],
+            shoppingList: [],
+            substitutionOptions: [],
+            tasteImpact: tasteImpact("HIGH", "Без проверенного источника портал не показывает рецепт."),
+            warnings: [],
+          },
+          "FAILED",
+        ),
+        adaptedRecipe: null,
+        makeability: "CANNOT_MAKE",
+        missingIngredients: [],
+        shoppingList: [],
+        substitutionOptions: [],
+        tasteImpact: tasteImpact("HIGH", "Без проверенного источника портал не показывает рецепт."),
+        sourceStatus: "FAILED",
+        sources: [],
+        model: recipeModel,
+        status: "FAILED",
+        error: "Не нашел подтвержденную страницу рецепта в доверенных источниках.",
+      };
+    }
+
+    const localAssessment = buildLocalRecipeInventoryAssessment(found.recipe, inventory);
+    const assessment = await assessRecipeAgainstInventoryWithAI(client, found.recipe, inventory, localAssessment);
+    const recipe = annotateRecipeWithAssessment(found.recipe, assessment, "VERIFIED");
+    const adaptedRecipe = assessment.adaptedRecipe
+      ? annotateRecipeWithAssessment(assessment.adaptedRecipe, assessment, "VERIFIED")
+      : null;
+
+    return {
+      recipe,
+      adaptedRecipe,
+      makeability: assessment.makeability,
+      missingIngredients: assessment.missingIngredients,
+      shoppingList: assessment.shoppingList,
+      substitutionOptions: assessment.substitutionOptions,
+      tasteImpact: assessment.tasteImpact,
+      sourceStatus: "VERIFIED",
+      sources: found.sources,
+      model: recipeModel,
+      status: "SUCCESS",
+    };
+  } catch {
+    return {
+      recipe: annotateRecipeWithAssessment(
+        {
+          title: trimmedPrompt,
+          description: "Поиск рецепта завершился ошибкой.",
+          savedRecipeId: null,
+          matchType: null,
+          ingredients: [],
+          tools: [],
+          steps: ["Попробуйте повторить поиск чуть позже.", "Если ошибка повторится, уточните название рецепта."],
+          warnings: [],
+          sources: [],
+        },
+        {
+          adaptedRecipe: null,
+          makeability: "CANNOT_MAKE",
+          missingIngredients: [],
+          shoppingList: [],
+          substitutionOptions: [],
+          tasteImpact: tasteImpact("HIGH", "Рецепт не был найден и проверен."),
+          warnings: [],
+        },
+        "FAILED",
+      ),
+      adaptedRecipe: null,
+      makeability: "CANNOT_MAKE",
+      missingIngredients: [],
+      shoppingList: [],
+      substitutionOptions: [],
+      tasteImpact: tasteImpact("HIGH", "Рецепт не был найден и проверен."),
+      sourceStatus: "FAILED",
+      sources: [],
+      model: recipeModel,
+      status: "FAILED",
+      error: "Не удалось стабильно найти и проверить рецепт.",
+    };
+  }
 }
 
 export async function normalizeInventoryWithAI(input: Partial<InventoryInput>): Promise<InventoryAIResult> {
@@ -1061,7 +1721,7 @@ export async function generateRecipes(
     }
 
     if (processed.length > 0) {
-      return { recipes: processed, model: recipeModel, sources, status: "SUCCESS" };
+      return { recipes: processed.map((recipe) => annotateDiscoveredRecipe(recipe, inventory)), model: recipeModel, sources, status: "SUCCESS" };
     }
   } catch (error) {
     return {

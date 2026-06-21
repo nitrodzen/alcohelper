@@ -21,6 +21,32 @@ export type SourceLink = {
   url: string;
 };
 
+export type MakeabilityStatus = "AVAILABLE" | "AVAILABLE_WITH_SUBSTITUTIONS" | "NOT_RECOMMENDED" | "CANNOT_MAKE";
+export type SourceStatus = "VERIFIED" | "UNVERIFIED" | "FAILED";
+export type TasteImpact = {
+  level: "NONE" | "LOW" | "MEDIUM" | "HIGH";
+  summary: string;
+};
+export type MissingIngredient = {
+  name: string;
+  amount?: string;
+  kind?: "INGREDIENT" | "TOOL";
+};
+export type ShoppingListItem = {
+  name: string;
+  amount?: string;
+  note?: string;
+};
+export type SubstitutionOption = {
+  original: string;
+  originalAmount?: string;
+  substitute: string;
+  substituteInventoryItemId?: string | null;
+  note?: string;
+  tasteImpact: TasteImpact;
+  recommended: boolean;
+};
+
 export type GeneratedRecipe = {
   title: string;
   description: string;
@@ -39,6 +65,12 @@ export type GeneratedRecipe = {
   steps: string[];
   warnings: string[];
   sources?: SourceLink[];
+  makeability?: MakeabilityStatus;
+  missingIngredients?: MissingIngredient[];
+  shoppingList?: ShoppingListItem[];
+  substitutionOptions?: SubstitutionOption[];
+  tasteImpact?: TasteImpact;
+  sourceStatus?: SourceStatus;
 };
 
 export type AvailabilityStatus = "AVAILABLE" | "AVAILABLE_WITH_SUBSTITUTIONS" | "MISSING";
@@ -78,19 +110,42 @@ export type SavedRecipe = {
 };
 
 export type RecipeGeneration = {
+  mode?: "discover";
   recipes: GeneratedRecipe[];
   model: string;
   inventorySnapshot: InventoryItem[];
   sources: SourceLink[];
   historyId: string;
   requestPrompt: string;
+  result?: unknown;
+};
+
+export type RecipeLookupResult = {
+  mode: "lookup";
+  recipe: GeneratedRecipe;
+  adaptedRecipe: GeneratedRecipe | null;
+  makeability: MakeabilityStatus;
+  missingIngredients: MissingIngredient[];
+  shoppingList: ShoppingListItem[];
+  substitutionOptions: SubstitutionOption[];
+  tasteImpact: TasteImpact;
+  sourceStatus: SourceStatus;
+  sources: SourceLink[];
+  model: string;
+  inventorySnapshot: InventoryItem[];
+  historyId: string;
+  requestPrompt: string;
+  status?: "SUCCESS" | "FAILED";
+  error?: string;
 };
 
 export type RecipeRequestHistory = {
   id: string;
+  mode?: "discover" | "lookup";
   prompt: string;
   inventorySnapshot: InventoryItem[];
   recipes: GeneratedRecipe[] | null;
+  result?: RecipeGeneration | RecipeLookupResult | null;
   sources: SourceLink[];
   model: string;
   status: "SUCCESS" | "FAILED";

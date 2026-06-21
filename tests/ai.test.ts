@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAvailabilityCheckInstructions,
+  buildLocalRecipeInventoryAssessment,
   buildRecipeGenerationInstructions,
   buildRecipeGenerationPayload,
   createNormalizedInventoryPatch,
@@ -364,5 +365,90 @@ describe("recipe generation prompt helpers", () => {
     );
 
     expect(processed.map((item) => item.title)).toEqual(["Possible"]);
+  });
+
+  it("keeps a canonical recipe assessment even when an original ingredient is missing", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      {
+        title: "Black Russian",
+        description: "Vodka and coffee liqueur.",
+        ingredients: [
+          { name: "Vodka", amount: "50 мл", optional: false },
+          { name: "Coffee liqueur", amount: "25 мл", optional: false },
+        ],
+        tools: [],
+        steps: ["Build over ice", "Stir"],
+        warnings: [],
+        sources: [{ url: "https://www.diffordsguide.com/cocktails/recipe/316/black-russian" }],
+      },
+      [
+        { ...martiniWithBadAutofields, id: "vodka", name: "Vodka", category: "vodka", aliases: ["vodka"] },
+      ],
+    );
+
+    expect(assessment.makeability).toBe("CANNOT_MAKE");
+    expect(assessment.missingIngredients).toContainEqual({ name: "Coffee liqueur", amount: "25 мл", kind: "INGREDIENT" });
+    expect(assessment.shoppingList.map((item) => item.name)).toContain("Coffee liqueur");
+  });
+
+  it("allows a conservative dessert-liqueur substitute for missing coffee liqueur", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      {
+        title: "Black Russian",
+        description: "Vodka and coffee liqueur.",
+        ingredients: [
+          { name: "Vodka", amount: "50 мл", optional: false },
+          { name: "Coffee liqueur", amount: "25 мл", optional: false },
+        ],
+        tools: [],
+        steps: ["Build over ice", "Stir"],
+        warnings: [],
+        sources: [],
+      },
+      [
+        { ...martiniWithBadAutofields, id: "vodka", name: "Vodka", category: "vodka", aliases: ["vodka"] },
+        {
+          ...martiniWithBadAutofields,
+          id: "choco",
+          name: "Chocolate cream liqueur",
+          category: "dessert-liqueur",
+          aliases: ["chocolate liqueur", "cream liqueur"],
+        },
+      ],
+    );
+
+    expect(assessment.makeability).toBe("AVAILABLE_WITH_SUBSTITUTIONS");
+    expect(assessment.substitutionOptions).toContainEqual(
+      expect.objectContaining({
+        original: "Coffee liqueur",
+        substitute: "Chocolate cream liqueur",
+        tasteImpact: expect.objectContaining({ level: "MEDIUM" }),
+      }),
+    );
+    expect(assessment.adaptedRecipe?.ingredients.map((ingredient) => ingredient.name)).toContain("Chocolate cream liqueur");
+  });
+
+  it("does not mark a distant spirit as a small replacement for coffee liqueur", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      {
+        title: "Black Russian",
+        description: "Vodka and coffee liqueur.",
+        ingredients: [
+          { name: "Vodka", amount: "50 мл", optional: false },
+          { name: "Coffee liqueur", amount: "25 мл", optional: false },
+        ],
+        tools: [],
+        steps: ["Build over ice", "Stir"],
+        warnings: [],
+        sources: [],
+      },
+      [
+        { ...martiniWithBadAutofields, id: "vodka", name: "Vodka", category: "vodka", aliases: ["vodka"] },
+        { ...martiniWithBadAutofields, id: "gin", name: "London Dry Gin", category: "gin", aliases: ["gin"] },
+      ],
+    );
+
+    expect(assessment.makeability).toBe("CANNOT_MAKE");
+    expect(assessment.substitutionOptions).toEqual([]);
   });
 });

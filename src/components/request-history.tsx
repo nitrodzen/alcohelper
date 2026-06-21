@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Clock3, ExternalLink, RotateCcw } from "lucide-react";
 import { saveRecipeGeneration } from "@/lib/generation-storage";
-import type { RecipeRequestHistory } from "@/types/app";
+import type { RecipeLookupResult, RecipeRequestHistory } from "@/types/app";
 
 export function RequestHistory() {
   const router = useRouter();
@@ -23,7 +23,7 @@ export function RequestHistory() {
   }, []);
 
   function restoreToMain(request: RecipeRequestHistory) {
-    if (!request.recipes?.length) {
+    if (request.mode === "lookup" || !request.recipes?.length) {
       return;
     }
 
@@ -36,6 +36,14 @@ export function RequestHistory() {
       requestPrompt: request.prompt,
     });
     router.push("/");
+  }
+
+  function lookupResult(request: RecipeRequestHistory): RecipeLookupResult | null {
+    if (request.mode !== "lookup" || !request.result || typeof request.result !== "object") {
+      return null;
+    }
+    const result = request.result as Partial<RecipeLookupResult>;
+    return result.recipe && result.mode === "lookup" ? (result as RecipeLookupResult) : null;
   }
 
   if (loading) {
@@ -59,10 +67,11 @@ export function RequestHistory() {
               <div>
                 <h2>{request.prompt || "Подбор без комментария"}</h2>
                 <small>
-                  {new Date(request.createdAt).toLocaleString("ru-RU")} · {request.model} · {request.status === "SUCCESS" ? "успешно" : "ошибка"}
+                  {new Date(request.createdAt).toLocaleString("ru-RU")} · {request.mode === "lookup" ? "поиск рецепта" : "что можно собрать"} · {request.model} ·{" "}
+                  {request.status === "SUCCESS" ? "успешно" : "ошибка"}
                 </small>
               </div>
-              {request.recipes?.length ? (
+              {request.mode !== "lookup" && request.recipes?.length ? (
                 <button className="secondary-button" type="button" onClick={() => restoreToMain(request)}>
                   <RotateCcw size={18} />
                   На главную
@@ -70,9 +79,19 @@ export function RequestHistory() {
               ) : null}
             </div>
             {request.error ? <p className="warning-line">{request.error}</p> : null}
+            {lookupResult(request) ? (
+              <div className="history-recipes">
+                <h3>Проверка рецепта</h3>
+                <div className="history-recipe-row">
+                  <strong>{lookupResult(request)?.recipe.title}</strong>
+                  <span>{lookupResult(request)?.recipe.description}</span>
+                  <span>{lookupResult(request)?.makeability ? `Статус: ${lookupResult(request)?.makeability}` : ""}</span>
+                </div>
+              </div>
+            ) : null}
             {request.recipes?.length ? (
               <div className="history-recipes">
-                <h3>Найдено</h3>
+                <h3>{request.mode === "lookup" ? "Версии" : "Найдено"}</h3>
                 {request.recipes.map((recipe) => (
                   <div key={`${request.id}-${recipe.title}`} className="history-recipe-row">
                     <strong>{recipe.title}</strong>

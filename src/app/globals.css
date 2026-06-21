@@ -493,6 +493,233 @@ select {
   gap: 18px;
 }
 
+.lab-topbar {
+  align-items: end;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.lab-topbar h1 {
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  margin-bottom: 8px;
+}
+
+.lab-topbar p {
+  margin-bottom: 0;
+}
+
+.compact-strip {
+  justify-content: flex-end;
+}
+
+.mode-tabs {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 6px;
+}
+
+.mode-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  font-weight: 900;
+  gap: 8px;
+  justify-content: center;
+  min-height: 46px;
+  padding: 0 12px;
+}
+
+.mode-tab.selected {
+  background: var(--accent);
+  color: #fff;
+}
+
+.workflow-panel,
+.result-section,
+.lookup-result {
+  display: grid;
+  gap: 16px;
+}
+
+.prompt-row {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.prompt-row.stacked {
+  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+}
+
+.compact-actions {
+  align-content: end;
+  grid-template-columns: 1fr;
+}
+
+.quick-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-prompts button,
+.count-pill {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 900;
+  min-height: 34px;
+  padding: 0 11px;
+}
+
+.count-pill {
+  align-items: center;
+  display: inline-flex;
+  min-height: 28px;
+}
+
+.lookup-summary {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.lookup-summary.available {
+  border-color: #9bd2bd;
+}
+
+.lookup-summary.available_with_substitutions,
+.lookup-summary.not_recommended {
+  border-color: #f1c7ad;
+}
+
+.lookup-summary.cannot_make {
+  border-color: #f0c1bd;
+}
+
+.makeability-chip {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  font-weight: 900;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 9px;
+}
+
+.makeability-chip small {
+  flex-basis: 100%;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.makeability-chip.available {
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.makeability-chip.available_with_substitutions {
+  background: var(--warm-soft);
+  color: #803d25;
+}
+
+.makeability-chip.not_recommended {
+  background: #fff4d8;
+  color: #74510d;
+}
+
+.makeability-chip.cannot_make {
+  background: #fff0ef;
+  color: var(--danger);
+}
+
+.lookup-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lookup-detail {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.lookup-detail h3 {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.lookup-detail ul,
+.substitution-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.lookup-detail li {
+  border-bottom: 1px solid #eee6d8;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  padding-bottom: 7px;
+}
+
+.lookup-detail p {
+  margin-bottom: 0;
+}
+
+.substitution-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+}
+
+.substitution-row.recommended {
+  background: #f8fff9;
+  border-color: #cae6d5;
+}
+
+.substitution-row.risky {
+  background: #fff7ed;
+  border-color: #f1c7ad;
+}
+
+.substitution-row span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .recipe-hero {
   align-items: center;
   display: grid;
@@ -780,9 +1007,20 @@ select {
   }
 
   .workspace-grid,
+  .lab-topbar,
+  .lookup-grid,
   .recipe-hero,
   .recipe-grid,
   .recipe-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .compact-strip {
+    justify-content: flex-start;
+  }
+
+  .prompt-row,
+  .prompt-row.stacked {
     grid-template-columns: 1fr;
   }
 
@@ -798,7 +1036,8 @@ select {
 @media (max-width: 560px) {
   .form-grid,
   .kind-switch,
-  .icon-picker {
+  .icon-picker,
+  .mode-tabs {
     grid-template-columns: 1fr;
   }
 
@@ -815,11 +1054,26 @@ select {
 
   .primary-button,
   .secondary-button,
-  .ghost-button {
+  .ghost-button,
+  .prompt-row > .primary-button {
     width: 100%;
   }
 
   .prompt-actions {
     grid-template-columns: 1fr;
+  }
+
+  .lab-topbar h1 {
+    font-size: 2rem;
+  }
+
+  .lookup-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .makeability-chip {
+    border-radius: 8px;
+    justify-content: flex-start;
   }
 }

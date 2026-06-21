@@ -73,9 +73,11 @@ model SavedRecipe {
 model RecipeRequestHistory {
   id                String   @id @default(cuid())
   userId            String
+  mode              String   @default("discover")
   prompt            String   @default("")
   inventorySnapshot Json
   recipes           Json?
+  result            Json?
   sources           Json
   model             String
   status            String

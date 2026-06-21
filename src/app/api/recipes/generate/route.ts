@@ -13,6 +13,7 @@ export const runtime = "nodejs";
 
 const generateRequestSchema = z.object({
   prompt: z.string().trim().max(1200).optional().default(""),
+  mode: z.literal("discover").optional().default("discover"),
 });
 
 export async function POST(request: Request) {
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
     const history = await prisma.recipeRequestHistory.create({
       data: {
         userId,
+        mode: parsed.data.mode,
         prompt: parsed.data.prompt,
         inventorySnapshot: inventory as unknown as Prisma.InputJsonValue,
         sources: [] as unknown as Prisma.InputJsonValue,
@@ -89,12 +91,20 @@ export async function POST(request: Request) {
   });
 
   const result = await generateRecipes(inventory, parsed.data.prompt, savedRecipes);
+  const responseResult = {
+    mode: "discover" as const,
+    ...result,
+    inventorySnapshot: inventory,
+    requestPrompt: parsed.data.prompt,
+  };
   const history = await prisma.recipeRequestHistory.create({
     data: {
       userId,
+      mode: parsed.data.mode,
       prompt: parsed.data.prompt,
       inventorySnapshot: inventory as unknown as Prisma.InputJsonValue,
       recipes: result.status === "SUCCESS" ? (result.recipes as unknown as Prisma.InputJsonValue) : undefined,
+      result: responseResult as unknown as Prisma.InputJsonValue,
       sources: result.sources as unknown as Prisma.InputJsonValue,
       model: result.model,
       status: result.status,
@@ -116,6 +126,8 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     ...result,
+    mode: "discover",
+    result: responseResult,
     inventorySnapshot: inventory,
     historyId: history.id,
     requestPrompt: parsed.data.prompt,
