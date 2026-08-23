@@ -7,6 +7,7 @@ import {
   buildRecipeGenerationInstructions,
   buildRecipeGenerationPayload,
   createNormalizedInventoryPatch,
+  isSafeExternalSourceUrl,
   isValidNormalizedInventoryUpdate,
   postProcessGeneratedRecipes,
   verifyGeneratedRecipeSources,
@@ -160,7 +161,7 @@ describe("recipe generation prompt helpers", () => {
       targetNewRecipes: 6,
     });
     const substitutionPayload = buildRecipeGenerationPayload([{ ...martiniWithBadAutofields, name: "Dark rum", category: "rum", aliases: ["dark rum"] }]);
-    expect(substitutionPayload.substitutionHints).toContainEqual({ originalRole: "rum", availableSubstitutes: ["Dark rum"] });
+    expect(substitutionPayload.substitutionHints).toContainEqual({ originalRole: "rum-dark", availableSubstitutes: ["Dark rum"] });
   });
 
   it("tells the model to use sources and not invent recipes", () => {
@@ -408,7 +409,7 @@ describe("recipe generation prompt helpers", () => {
     );
 
     expect(assessment.makeability).toBe("CANNOT_MAKE");
-    expect(assessment.missingIngredients).toContainEqual({ name: "Coffee liqueur", amount: "25 мл", kind: "INGREDIENT" });
+    expect(assessment.missingIngredients).toContainEqual({ name: "Coffee liqueur", amount: "25 мл", kind: "INGREDIENT", reason: "ABSENT" });
     expect(assessment.shoppingList.map((item) => item.name)).toContain("Coffee liqueur");
   });
 
@@ -471,5 +472,81 @@ describe("recipe generation prompt helpers", () => {
 
     expect(assessment.makeability).toBe("CANNOT_MAKE");
     expect(assessment.substitutionOptions).toEqual([]);
+  });
+
+  it("marks a tracked but insufficient ingredient as unavailable without inventing a replacement", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      recipe("Short vodka", { ingredients: [{ name: "Vodka", amount: "50 мл", optional: false }] }),
+      [{ ...martiniWithBadAutofields, id: "vodka", name: "Vodka", category: "vodka", aliases: ["vodka"], quantity: 20 }],
+    );
+
+    expect(assessment.makeability).toBe("CANNOT_MAKE");
+    expect(assessment.missingIngredients).toContainEqual(expect.objectContaining({
+      name: "Vodka",
+      reason: "INSUFFICIENT",
+      availableAmount: "20 мл",
+    }));
+    expect(assessment.substitutionOptions).toEqual([]);
+  });
+
+  it("does not recommend cola as a small replacement for tonic", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      recipe("Vodka tonic", {
+        ingredients: [
+          { name: "Vodka", amount: "50 мл", optional: false },
+          { name: "Tonic water", amount: "120 мл", optional: false },
+        ],
+      }),
+      [
+        { ...martiniWithBadAutofields, id: "vodka", name: "Vodka", category: "vodka", aliases: ["vodka"] },
+        { ...martiniWithBadAutofields, id: "cola", name: "Cola", category: "mixer", aliases: ["cola"] },
+      ],
+    );
+
+    expect(assessment.makeability).toBe("CANNOT_MAKE");
+    expect(assessment.substitutionOptions).toContainEqual(expect.objectContaining({
+      original: "Tonic water",
+      substitute: "Cola",
+      recommended: false,
+      tasteImpact: expect.objectContaining({ level: "HIGH" }),
+    }));
+  });
+
+  it("marks several medium substitutions as not recommended", () => {
+    const assessment = buildLocalRecipeInventoryAssessment(
+      recipe("Changed Daiquiri", {
+        ingredients: [
+          { name: "White rum", amount: "50 мл", optional: false },
+          { name: "Lime juice", amount: "25 мл", optional: false },
+        ],
+      }),
+      [
+        { ...martiniWithBadAutofields, id: "dark-rum", name: "Dark rum", category: "rum", aliases: ["dark rum"] },
+        { ...martiniWithBadAutofields, id: "lemon", name: "Lemon juice", category: "citrus", aliases: ["lemon juice"] },
+      ],
+    );
+
+    expect(assessment.makeability).toBe("NOT_RECOMMENDED");
+    expect(assessment.substitutionOptions).toHaveLength(2);
+    expect(assessment.tasteImpact.level).toBe("HIGH");
+  });
+
+  it("rejects local addresses and redirects from trusted sources to local services", async () => {
+    expect(isSafeExternalSourceUrl("http://127.0.0.1:3000/admin")).toBe(false);
+    expect(isSafeExternalSourceUrl("http://db:5432")).toBe(false);
+    expect(isSafeExternalSourceUrl("https://www.diffordsguide.com/cocktails/recipe/316/black-russian")).toBe(true);
+
+    const fetchedUrls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      fetchedUrls.push(String(input));
+      return new Response("", { status: 302, headers: { location: "http://127.0.0.1:3000/private" } });
+    };
+    const verified = await verifyGeneratedRecipeSources(
+      [recipe("Redirected", { sources: [{ url: "https://www.diffordsguide.com/redirected" }] })],
+      { fetchImpl, validator: validSourceValidator },
+    );
+
+    expect(verified).toEqual([]);
+    expect(fetchedUrls.some((url) => url.includes("127.0.0.1"))).toBe(false);
   });
 });

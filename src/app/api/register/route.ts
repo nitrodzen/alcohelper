@@ -2,6 +2,8 @@ import { hash } from "bcryptjs";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isRegistrationAllowed } from "@/lib/registration";
 import { seedInitialInventoryForUser } from "@/lib/seed";
 
 export const runtime = "nodejs";
@@ -14,6 +16,11 @@ const registerSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const clientIp = getClientIp(request);
+  if (!checkRateLimit(`register:${clientIp}`, 8, 60 * 60 * 1000)) {
+    return NextResponse.json({ error: "Слишком много попыток регистрации. Попробуйте позже." }, { status: 429 });
+  }
+
   const parsed = registerSchema.safeParse(await request.json().catch(() => null));
 
   if (!parsed.success) {
@@ -21,6 +28,10 @@ export async function POST(request: Request) {
   }
 
   const email = parsed.data.email.toLowerCase();
+  if (!isRegistrationAllowed(email)) {
+    return NextResponse.json({ error: "Этот email не включен в список приглашенных." }, { status: 403 });
+  }
+
   const existing = await prisma.user.findUnique({ where: { email } });
 
   if (existing) {

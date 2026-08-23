@@ -4,7 +4,8 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { LockKeyhole, LogIn, UserPlus } from "lucide-react";
+import { LockKeyhole, LogIn, ShieldCheck, UserPlus } from "lucide-react";
+import { errorMessage, requestJson } from "@/lib/client-api";
 
 type Mode = "signin" | "register";
 
@@ -22,42 +23,44 @@ export function AuthForm({ mode }: { mode: Mode }) {
     const email = String(form.get("email") ?? "");
     const password = String(form.get("password") ?? "");
 
-    if (mode === "register") {
-      const response = await fetch("/api/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: String(form.get("name") ?? ""),
-          email,
-          password,
-          ageConfirmed: form.get("ageConfirmed") === "on",
-        }),
+    try {
+      if (mode === "register") {
+        const response = await requestJson<{ error?: string }>("/api/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: String(form.get("name") ?? ""),
+            email,
+            password,
+            ageConfirmed: form.get("ageConfirmed") === "on",
+          }),
+        }, 30_000);
+
+        if (!response.ok) {
+          setError(response.data.error ?? "Не удалось создать аккаунт.");
+          return;
+        }
+      }
+
+      const result = await signIn("credentials", {
+        email,
+        password,
+        redirect: false,
+        callbackUrl: "/",
       });
 
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        setError(data.error ?? "Не удалось создать аккаунт.");
-        setLoading(false);
+      if (result?.error) {
+        setError("Неверный email или пароль.");
         return;
       }
+
+      router.push("/");
+      router.refresh();
+    } catch (error) {
+      setError(errorMessage(error, "Сервис временно недоступен. Попробуйте еще раз."));
+    } finally {
+      setLoading(false);
     }
-
-    const result = await signIn("credentials", {
-      email,
-      password,
-      redirect: false,
-      callbackUrl: "/",
-    });
-
-    setLoading(false);
-
-    if (result?.error) {
-      setError("Неверный email или пароль.");
-      return;
-    }
-
-    router.push("/");
-    router.refresh();
   }
 
   const isRegister = mode === "register";
@@ -66,10 +69,10 @@ export function AuthForm({ mode }: { mode: Mode }) {
     <section className="auth-shell">
       <div className="auth-panel">
         <div className="auth-icon">
-          <LockKeyhole size={24} />
+          {isRegister ? <ShieldCheck size={24} /> : <LockKeyhole size={24} />}
         </div>
         <h1>{isRegister ? "Создать доступ" : "Войти в портал"}</h1>
-        <p>Закрытый помощник для домашнего бара. Используйте только если вам уже можно употреблять алкоголь по вашим правилам и законам.</p>
+        <p>{isRegister ? "Регистрация доступна только для приглашенных email." : "Закрытый помощник для домашнего бара."}</p>
         <form className="stack-form" onSubmit={onSubmit}>
           {isRegister ? (
             <label>
@@ -91,7 +94,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
               <span>Подтверждаю, что мне разрешено пользоваться алкогольным сервисом.</span>
             </label>
           ) : null}
-          {error ? <div className="form-error">{error}</div> : null}
+          {error ? <div className="form-error" role="alert" aria-live="polite">{error}</div> : null}
           <button className="primary-button" type="submit" disabled={loading}>
             {isRegister ? <UserPlus size={18} /> : <LogIn size={18} />}
             {loading ? "Подождите..." : isRegister ? "Зарегистрироваться" : "Войти"}
@@ -101,7 +104,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
           {isRegister ? (
             <Link href="/auth/signin">Уже есть аккаунт</Link>
           ) : (
-            <Link href="/auth/register">Создать аккаунт</Link>
+            <Link href="/auth/register">Регистрация по приглашению</Link>
           )}
         </div>
       </div>

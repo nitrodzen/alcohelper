@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Bot, CheckCircle2, Plus, Save, Sparkles, Trash2, X } from "lucide-react";
 import { ItemIcon, selectableIcons } from "@/components/icon";
+import { errorMessage, requestJson } from "@/lib/client-api";
 import type { InventoryItem, InventoryKind } from "@/types/app";
 
 const units = ["мл", "л", "шт", "г", "кг", "капли", "кубики", "дольки", "ложки", "бутылка"] as const;
@@ -17,7 +18,7 @@ const emptyForm = {
   kind: "ALCOHOL" as InventoryKind,
   name: "",
   category: "",
-  quantity: "1",
+  quantity: "",
   unit: "мл",
   abv: "",
   description: "",
@@ -88,15 +89,24 @@ export function InventoryManager() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [form, setForm] = useState<InventoryForm>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [quickInput, setQuickInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
   async function loadItems() {
-    const response = await fetch("/api/inventory", { cache: "no-store" });
-    const data = await response.json();
-    setItems(data.items ?? []);
-    setLoading(false);
+    try {
+      const response = await requestJson<{ items?: InventoryItem[]; error?: string }>("/api/inventory", { cache: "no-store" }, 30_000);
+      if (!response.ok) {
+        setMessage(response.data.error ?? "Не удалось загрузить инвентарь.");
+        return;
+      }
+      setItems(response.data.items ?? []);
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось загрузить инвентарь."));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -122,21 +132,23 @@ export function InventoryManager() {
     setSaving(true);
     setMessage("");
 
-    const response = await fetch("/api/inventory/normalize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(toPayload(form)),
-    });
-    const data = await response.json();
-    setSaving(false);
-
-    if (!response.ok) {
-      setMessage(data.error ?? "Не удалось нормализовать предмет.");
-      return;
+    try {
+      const response = await requestJson<{ item?: Omit<InventoryItem, "id" | "aiReviewedAt">; aiReviewed?: boolean; error?: string }>("/api/inventory/normalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(toPayload(form)),
+      });
+      if (!response.ok || !response.data.item) {
+        setMessage(response.data.error ?? "Не удалось нормализовать предмет.");
+        return;
+      }
+      setForm(toForm({ id: editingId ?? "draft", aiReviewedAt: response.data.aiReviewed ? new Date().toISOString() : null, ...response.data.item }));
+      setMessage("Предложение применено. Его можно поправить перед сохранением.");
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось нормализовать предмет."));
+    } finally {
+      setSaving(false);
     }
-
-    setForm(toForm({ id: editingId ?? "draft", aiReviewedAt: data.aiReviewed ? new Date().toISOString() : null, ...data.item }));
-    setMessage("Предложение применено. Его можно поправить перед сохранением.");
   }
 
   async function save(event: FormEvent) {
@@ -144,29 +156,69 @@ export function InventoryManager() {
     setSaving(true);
     setMessage("");
 
-    const response = await fetch(editingId ? `/api/inventory/${editingId}` : "/api/inventory", {
-      method: editingId ? "PATCH" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(toPayload(form)),
-    });
-    const data = await response.json();
-    setSaving(false);
-
-    if (!response.ok) {
-      setMessage(data.error ?? "Не удалось сохранить предмет.");
-      return;
+    try {
+      const response = await requestJson<{ error?: string }>(editingId ? `/api/inventory/${editingId}` : "/api/inventory", {
+        method: editingId ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(toPayload(form)),
+      }, 30_000);
+      if (!response.ok) {
+        setMessage(response.data.error ?? "Не удалось сохранить предмет.");
+        return;
+      }
+      setForm(emptyForm);
+      setEditingId(null);
+      await loadItems();
+      setMessage("Инвентарь обновлен.");
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось сохранить предмет."));
+    } finally {
+      setSaving(false);
     }
-
-    setForm(emptyForm);
-    setEditingId(null);
-    await loadItems();
-    setMessage("Инвентарь обновлен.");
   }
 
   async function remove(id: string) {
-    const response = await fetch(`/api/inventory/${id}`, { method: "DELETE" });
-    if (response.ok) {
-      setItems((current) => current.filter((item) => item.id !== id));
+    const item = items.find((candidate) => candidate.id === id);
+    if (!window.confirm(`Удалить «${item?.name ?? "эту позицию"}» из инвентаря?`)) {
+      return;
+    }
+    try {
+      const response = await requestJson<{ error?: string }>(`/api/inventory/${id}`, { method: "DELETE" }, 30_000);
+      if (response.ok) {
+        setItems((current) => current.filter((candidate) => candidate.id !== id));
+      } else {
+        setMessage(response.data.error ?? "Не удалось удалить позицию.");
+      }
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось удалить позицию."));
+    }
+  }
+
+  async function addMany() {
+    const names = quickInput.split(/[\n,;]+/).map((name) => name.trim()).filter(Boolean);
+    if (!names.length) {
+      setMessage("Введите хотя бы одно название.");
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await requestJson<{ createdCount?: number; skippedCount?: number; error?: string }>("/api/inventory/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names }),
+      }, 30_000);
+      if (!response.ok) {
+        setMessage(response.data.error ?? "Не удалось добавить список.");
+        return;
+      }
+      setQuickInput("");
+      await loadItems();
+      setMessage(`Добавлено: ${response.data.createdCount ?? 0}${response.data.skippedCount ? `, уже были: ${response.data.skippedCount}` : ""}.`);
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось добавить список."));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -183,6 +235,16 @@ export function InventoryManager() {
             <span>{counts.INGREDIENT} инг.</span>
             <span>{counts.TOOL} инстр.</span>
           </div>
+        </div>
+        <div className="quick-add-panel">
+          <label>
+            Добавить несколько позиций
+            <textarea value={quickInput} onChange={(event) => setQuickInput(event.target.value)} rows={2} placeholder="Водка, джин, лайм, тоник" maxLength={1800} />
+          </label>
+          <button className="secondary-button" type="button" onClick={addMany} disabled={saving || !quickInput.trim()}>
+            <Plus size={18} />
+            Добавить список
+          </button>
         </div>
         <form className="inventory-form" onSubmit={save}>
           <div className="kind-switch" aria-label="Тип предмета">
@@ -212,12 +274,12 @@ export function InventoryManager() {
               <input value={form.name} onChange={(event) => setForm(clearAIFields({ ...form, name: event.target.value }))} required maxLength={120} />
             </label>
             <label>
-              Количество
-              <input value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} type="number" min="0" step="0.01" required />
+              Остаток, необязательно
+              <input value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} type="number" min="0" step="0.01" placeholder="Не отслеживать" />
             </label>
             <label>
               Ед.
-              <select value={form.unit} onChange={(event) => setForm({ ...form, unit: event.target.value })} required>
+              <select value={form.unit || defaultUnit(form.kind)} onChange={(event) => setForm({ ...form, unit: event.target.value })} required={form.quantity !== ""} disabled={form.quantity === ""}>
                 {units.map((unit) => (
                   <option key={unit} value={unit}>
                     {unit}
@@ -225,13 +287,6 @@ export function InventoryManager() {
                 ))}
               </select>
             </label>
-          </div>
-          <div className="icon-picker" aria-label="Выбор иконки">
-            {selectableIcons.map((icon) => (
-              <button key={icon} type="button" className={form.icon === icon ? "selected" : ""} title={icon} onClick={() => setForm({ ...form, icon, aiReviewed: false })}>
-                <ItemIcon name={icon} />
-              </button>
-            ))}
           </div>
           <details className="optional-fields">
             <summary>Необязательно, может заполнить AI</summary>
@@ -253,8 +308,15 @@ export function InventoryManager() {
               Описание
               <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value, aiReviewed: false })} rows={4} maxLength={1200} />
             </label>
+            <div className="icon-picker" aria-label="Выбор иконки">
+              {selectableIcons.map((icon) => (
+                <button key={icon} type="button" className={form.icon === icon ? "selected" : ""} title={icon} onClick={() => setForm({ ...form, icon, aiReviewed: false })}>
+                  <ItemIcon name={icon} />
+                </button>
+              ))}
+            </div>
           </details>
-          {message ? <div className="form-note">{message}</div> : null}
+          {message ? <div className={message.startsWith("Не") || message.startsWith("Введите") ? "form-error" : "form-note"} aria-live="polite">{message}</div> : null}
           <div className="button-row">
             <button className="secondary-button" type="button" onClick={normalize} disabled={saving}>
               <Sparkles size={18} />

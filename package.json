@@ -16,8 +16,8 @@
     "@prisma/client": "6.19.3",
     "bcryptjs": "3.0.3",
     "lucide-react": "1.14.0",
-    "next": "16.2.5",
-    "next-auth": "4.24.14",
+    "next": "16.3.2",
+    "next-auth": "4.24.15",
     "openai": "6.37.0",
     "prisma": "6.19.3",
     "react": "19.2.6",
@@ -29,6 +29,9 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "typescript": "5.9.3",
-    "vitest": "4.0.15"
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "deepmerge-ts": "8.0.2"
   }
 }

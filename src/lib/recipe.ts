@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { hasMatchingInventoryItem, type InventoryForAI } from "@/lib/inventory";
+import { findMatchingInventoryItem, hasMatchingInventoryItem, hasSufficientInventoryAmount, normalizeText, type InventoryForAI } from "@/lib/inventory";
 
 export const sourceLinkSchema = z.object({
   title: z.string().trim().max(180).optional(),
@@ -19,6 +19,8 @@ export const missingIngredientSchema = z.object({
   name: z.string().trim().min(1).max(120),
   amount: z.string().trim().max(80).optional(),
   kind: z.enum(["INGREDIENT", "TOOL"]).optional().default("INGREDIENT"),
+  reason: z.enum(["ABSENT", "INSUFFICIENT"]).optional().default("ABSENT"),
+  availableAmount: z.string().trim().max(80).optional(),
 });
 
 export const shoppingListItemSchema = z.object({
@@ -111,14 +113,15 @@ export function validateRecipeAgainstInventory(recipe: GeneratedRecipe, inventor
     if (ingredient.optional) {
       return false;
     }
-    return !hasMatchingInventoryItem(ingredient.name, inventory, ["ALCOHOL", "INGREDIENT"]);
+    const item = findMatchingInventoryItem(ingredient.name, inventory, ["ALCOHOL", "INGREDIENT"]);
+    return !item || hasSufficientInventoryAmount(ingredient.amount, item) === false;
   });
 
   if (hasMissingIngredient) {
     return null;
   }
 
-  const requiredTools = recipe.tools.filter((tool) => !tool.optional);
+  const requiredTools = recipe.tools.filter((tool) => !tool.optional && isBlockingTool(tool.name));
   const hasMissingTool = requiredTools.some((tool) => !hasMatchingInventoryItem(tool.name, inventory, ["TOOL"]));
 
   if (hasMissingTool) {
@@ -126,6 +129,11 @@ export function validateRecipeAgainstInventory(recipe: GeneratedRecipe, inventor
   }
 
   return recipe;
+}
+
+export function isBlockingTool(name: string): boolean {
+  const normalized = normalizeText(name);
+  return /блендер|blender|сифон|siphon|коптиль|smoking gun|центрифуг|centrifuge/.test(normalized);
 }
 
 export function filterRecipesByInventory(recipes: GeneratedRecipe[], inventory: InventoryForAI[]): GeneratedRecipe[] {

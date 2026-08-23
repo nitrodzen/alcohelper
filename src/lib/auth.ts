@@ -3,12 +3,14 @@ import type { JWT } from "next-auth/jwt";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit, getClientIpFromHeaders } from "@/lib/rate-limit";
 
 type SessionWithUserId = Session & {
   user: Session["user"] & { id: string };
 };
 
 export const authOptions: NextAuthOptions = {
+  useSecureCookies: process.env.NODE_ENV === "production",
   session: {
     strategy: "jwt",
   },
@@ -22,11 +24,20 @@ export const authOptions: NextAuthOptions = {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, request) {
         const email = credentials?.email?.trim().toLowerCase();
         const password = credentials?.password;
 
         if (!email || !password) {
+          return null;
+        }
+
+        const clientIp = getClientIpFromHeaders(new Headers(request.headers as HeadersInit));
+        const windowMs = 15 * 60 * 1000;
+        if (
+          !checkRateLimit(`signin-ip:${clientIp}`, 60, windowMs) ||
+          !checkRateLimit(`signin-account:${clientIp}:${email}`, 10, windowMs)
+        ) {
           return null;
         }
 

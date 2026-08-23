@@ -31,6 +31,8 @@ export type MissingIngredient = {
   name: string;
   amount?: string;
   kind?: "INGREDIENT" | "TOOL";
+  reason?: "ABSENT" | "INSUFFICIENT";
+  availableAmount?: string;
 };
 export type ShoppingListItem = {
   name: string;

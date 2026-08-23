@@ -86,6 +86,40 @@ describe("recipe validation", () => {
     expect(recipes).toHaveLength(0);
   });
 
+  it("does not block a recipe when a common bar tool is absent", () => {
+    const recipes = filterRecipesByInventory(
+      [{
+        title: "Built drink",
+        description: "Simple",
+        ingredients: [{ name: "white rum", amount: "50 мл", optional: false }],
+        tools: [{ name: "bar spoon", optional: false }],
+        steps: ["Pour", "Stir"],
+        warnings: [],
+        sources: [],
+      }],
+      inventory.filter((item) => item.kind !== "TOOL"),
+    );
+
+    expect(recipes).toHaveLength(1);
+  });
+
+  it("blocks recipes that require more tracked stock than is available", () => {
+    const recipes = filterRecipesByInventory(
+      [{
+        title: "Large pour",
+        description: "Simple",
+        ingredients: [{ name: "white rum", amount: "600 мл", optional: false }],
+        tools: [],
+        steps: ["Pour", "Serve"],
+        warnings: [],
+        sources: [],
+      }],
+      inventory,
+    );
+
+    expect(recipes).toHaveLength(0);
+  });
+
   it("accepts up to 10 generated recipe options", () => {
     const recipe = {
       title: "Rum Lime",

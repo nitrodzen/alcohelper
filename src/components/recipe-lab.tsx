@@ -1,14 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 import {
   AlertTriangle,
   Check,
   CheckCircle2,
   ExternalLink,
+  ChevronDown,
   FlaskConical,
   ListChecks,
+  LoaderCircle,
   RotateCcw,
   Save,
   Search,
@@ -17,6 +19,7 @@ import {
   Sparkles,
   XCircle,
 } from "lucide-react";
+import { errorMessage, requestJson } from "@/lib/client-api";
 import { clearRecipeGeneration, loadRecipeGeneration, saveRecipeGeneration } from "@/lib/generation-storage";
 import type { GeneratedRecipe, InventoryItem, MakeabilityStatus, RecipeGeneration, RecipeLookupResult, SavedRecipe, SubstitutionOption } from "@/types/app";
 
@@ -24,7 +27,7 @@ type LabMode = "lookup" | "discover";
 
 const makeabilityLabels: Record<MakeabilityStatus, string> = {
   AVAILABLE: "Можно сейчас",
-  AVAILABLE_WITH_SUBSTITUTIONS: "Можно с малой заменой",
+  AVAILABLE_WITH_SUBSTITUTIONS: "Можно с заменой",
   NOT_RECOMMENDED: "Вкус сильно сместится",
   CANNOT_MAKE: "Собрать нельзя",
 };
@@ -47,7 +50,7 @@ function statusClass(status?: MakeabilityStatus) {
 function groupRecipes(recipes: GeneratedRecipe[]) {
   return {
     available: recipes.filter((recipe) => recipe.makeability === "AVAILABLE" || (!recipe.makeability && recipe.matchType !== "SUBSTITUTION")),
-    substitutions: recipes.filter((recipe) => recipe.makeability === "AVAILABLE_WITH_SUBSTITUTIONS" || recipe.matchType === "SUBSTITUTION"),
+    substitutions: recipes.filter((recipe) => recipe.makeability === "AVAILABLE_WITH_SUBSTITUTIONS" || (!recipe.makeability && recipe.matchType === "SUBSTITUTION")),
     notRecommended: recipes.filter((recipe) => recipe.makeability === "NOT_RECOMMENDED"),
   };
 }
@@ -57,7 +60,7 @@ function sourceStatusLabel(status?: RecipeLookupResult["sourceStatus"]) {
     return "Источник проверен";
   }
   if (status === "UNVERIFIED") {
-    return "Research-режим: рецепт найден, но источник не прошел строгую проверку";
+    return "Источник найден, но не прошел строгую проверку";
   }
   return "Источник не найден";
 }
@@ -121,14 +124,24 @@ function RecipeCard({
   saved,
   onSave,
   saveLabel = "Сохранить",
+  compact = false,
 }: {
   recipe: GeneratedRecipe;
   saved: boolean;
   onSave: () => void;
   saveLabel?: string;
+  compact?: boolean;
 }) {
+  const missingByName = new Map((recipe.missingIngredients ?? []).map((item) => [recipeTitleKey(item.name), item]));
+  const substitutionsByName = new Map(
+    (recipe.substitutionOptions ?? []).flatMap((item) => [
+      [recipeTitleKey(item.original), item] as const,
+      [recipeTitleKey(item.substitute), item] as const,
+    ]),
+  );
+
   return (
-    <article className="recipe-card">
+    <article className={compact ? "recipe-card compact" : "recipe-card"}>
       <div className="recipe-card-head">
         <div>
           <div className="title-row">
@@ -139,49 +152,68 @@ function RecipeCard({
           </div>
           <p>{recipe.description}</p>
         </div>
-        <button className="icon-action" type="button" title={saved ? "Уже сохранен" : saveLabel} onClick={onSave} disabled={saved}>
+        <button className="icon-action" type="button" title={saved ? "Уже сохранен" : saveLabel} aria-label={saved ? "Уже сохранен" : saveLabel} onClick={onSave} disabled={saved}>
           {saved ? <Check size={19} /> : <Save size={19} />}
         </button>
       </div>
-      <div className="recipe-columns">
-        <div>
-          <h3>Состав</h3>
-          <ul>
-            {recipe.ingredients.map((ingredient) => (
-              <li key={`${recipe.title}-${ingredient.name}-${ingredient.amount}`}>
-                <span>{ingredient.name}</span>
+      <div className="recipe-ingredients">
+        <h3>Состав</h3>
+        <ul>
+          {recipe.ingredients.map((ingredient) => {
+            const key = recipeTitleKey(ingredient.name);
+            const missing = missingByName.get(key);
+            const substitution = substitutionsByName.get(key);
+            const state = substitution ? "substitution" : missing ? "missing" : "available";
+            const StateIcon = substitution ? Shuffle : missing ? AlertTriangle : CheckCircle2;
+            return (
+              <li key={`${recipe.title}-${ingredient.name}-${ingredient.amount}`} className={`ingredient-row ${state}`}>
+                <span className="ingredient-name">
+                  <StateIcon size={15} />
+                  <span>
+                    {ingredient.name}
+                    {missing?.reason === "INSUFFICIENT" ? <small>Есть {missing.availableAmount ?? "меньше нужного"}</small> : null}
+                  </span>
+                </span>
                 <strong>{ingredient.amount}</strong>
               </li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h3>Инструменты</h3>
-          <ul>
-            {recipe.tools.length ? (
-              recipe.tools.map((tool) => (
-                <li key={`${recipe.title}-${tool.name}`}>
-                  <span>{tool.name}</span>
-                  <strong>{tool.optional ? "опц." : "нужен"}</strong>
+            );
+          })}
+        </ul>
+      </div>
+      <details className="recipe-method" open={compact ? undefined : true}>
+        <summary>
+          Приготовление и инструменты
+          <ChevronDown size={18} />
+        </summary>
+        <div className="recipe-method-body">
+          <div className="recipe-tools">
+            <h3>Инструменты</h3>
+            <ul>
+              {recipe.tools.length ? (
+                recipe.tools.map((tool) => (
+                  <li key={`${recipe.title}-${tool.name}`}>
+                    <span>{tool.name}</span>
+                    <strong>{tool.optional ? "опц." : "нужен"}</strong>
+                  </li>
+                ))
+              ) : (
+                <li>
+                  <span>Без специнструмента</span>
+                  <strong>ок</strong>
                 </li>
-              ))
-            ) : (
-              <li>
-                <span>Без специнструмента</span>
-                <strong>ок</strong>
-              </li>
-            )}
-          </ul>
+              )}
+            </ul>
+          </div>
+          <div className="steps">
+            <h3>Шаги</h3>
+            <ol>
+              {recipe.steps.map((step) => (
+                <li key={`${recipe.title}-${step}`}>{step}</li>
+              ))}
+            </ol>
+          </div>
         </div>
-      </div>
-      <div className="steps">
-        <h3>Шаги</h3>
-        <ol>
-          {recipe.steps.map((step) => (
-            <li key={`${recipe.title}-${step}`}>{step}</li>
-          ))}
-        </ol>
-      </div>
+      </details>
       {recipe.warnings.length ? <p className="warning-line">{recipe.warnings.join(" ")}</p> : null}
       {recipe.sources?.length ? (
         <div className="source-list">
@@ -211,17 +243,25 @@ export function RecipeLab() {
   const [discoverPrompt, setDiscoverPrompt] = useState("");
 
   async function loadInventory() {
-    const response = await fetch("/api/inventory", { cache: "no-store" });
-    const data = await response.json();
-    setInventory(data.items ?? []);
+    try {
+      const response = await requestJson<{ items?: InventoryItem[] }>("/api/inventory", { cache: "no-store" }, 30_000);
+      if (response.ok) {
+        setInventory(response.data.items ?? []);
+      }
+    } catch {
+      setMessage("Не удалось обновить инвентарь. Перезагрузите страницу.");
+    }
   }
 
   async function loadSavedRecipes() {
-    const response = await fetch("/api/recipes", { cache: "no-store" });
-    const data = await response.json();
-    const loaded: SavedRecipe[] = data.recipes ?? [];
-    setSavedRecipeIds(new Set(loaded.map((recipe) => recipe.id)));
-    setSavedTitleKeys(new Set(loaded.map((recipe) => recipeTitleKey(recipe.title))));
+    try {
+      const response = await requestJson<{ recipes?: SavedRecipe[] }>("/api/recipes", { cache: "no-store" }, 30_000);
+      const loaded = response.ok ? response.data.recipes ?? [] : [];
+      setSavedRecipeIds(new Set(loaded.map((recipe) => recipe.id)));
+      setSavedTitleKeys(new Set(loaded.map((recipe) => recipeTitleKey(recipe.title))));
+    } catch {
+      setMessage("Не удалось обновить сохраненные рецепты.");
+    }
   }
 
   useEffect(() => {
@@ -256,75 +296,94 @@ export function RecipeLab() {
     setLookupResult(null);
     setMessage("Ищу страницу рецепта и сверяю с инвентарем.");
 
-    const response = await fetch("/api/recipes/lookup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    });
-    const data = await response.json();
-    if (options.loading ?? true) {
-      setLoadingMode(null);
-    }
-
-    if (!response.ok && !data.recipe) {
-      setMessage(data.error ?? "Не удалось найти рецепт.");
+    try {
+      const response = await requestJson<Partial<RecipeLookupResult> & { error?: string }>("/api/recipes/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok && !response.data.recipe) {
+        setMessage(response.data.error ?? "Не удалось найти рецепт.");
+        return null;
+      }
+      const data = response.data as RecipeLookupResult;
+      setLookupResult(data);
+      setMessage(response.ok && !data.error ? "" : data.error ?? "Показываю результат с ограниченной проверкой источника.");
+      return data;
+    } catch (error) {
+      setMessage(errorMessage(error, "Поиск прервался. Попробуйте еще раз."));
       return null;
+    } finally {
+      if (options.loading ?? true) {
+        setLoadingMode(null);
+      }
     }
-
-    setLookupResult(data);
-    setMessage(response.ok && !data.error ? "" : data.error ?? "Показываю research-результат без строгой проверки источника.");
-    return data as RecipeLookupResult;
   }
 
-  async function lookup() {
-    setLoadingMode("lookup");
-    await runLookup(lookupPrompt, { loading: false });
-    setLoadingMode(null);
+  async function lookup(event?: FormEvent) {
+    event?.preventDefault();
+    await runLookup(lookupPrompt);
   }
 
-  async function generateDiscover() {
+  async function generateDiscover(event?: FormEvent) {
+    event?.preventDefault();
     setLoadingMode("discover");
     setGeneration(null);
     clearRecipeGeneration();
     setMessage("Ищу напитки, которые можно собрать сейчас или с малой заменой.");
 
-    const response = await fetch("/api/recipes/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: discoverPrompt, mode: "discover" }),
-    });
-    const data = await response.json();
-    setLoadingMode(null);
-
-    if (!response.ok) {
-      if (discoverPrompt.trim()) {
-        setMessage("Готовых вариантов из инвентаря не нашел. Показываю research по запросу.");
-        await runLookup(discoverPrompt, { loading: false });
-      } else {
-        setMessage(data.error ?? "Не удалось подобрать коктейли.");
-      }
+    if (!inventoryReady && discoverPrompt.trim()) {
+      setMessage("Инвентарь пока пуст. Показываю разбор конкретного запроса.");
+      await runLookup(discoverPrompt, { loading: false });
+      setLoadingMode(null);
+      return;
+    }
+    if (!inventoryReady) {
+      setMessage("Добавьте хотя бы один напиток или ингредиент в инвентарь.");
+      setLoadingMode(null);
       return;
     }
 
-    const nextGeneration: RecipeGeneration = {
-      mode: "discover",
-      recipes: data.recipes ?? [],
-      model: data.model,
-      inventorySnapshot: data.inventorySnapshot ?? inventory,
-      sources: data.sources ?? [],
-      historyId: data.historyId,
-      requestPrompt: data.requestPrompt ?? discoverPrompt,
-      result: data.result,
-    };
+    try {
+      const response = await requestJson<Partial<RecipeGeneration> & { error?: string }>("/api/recipes/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: discoverPrompt, mode: "discover" }),
+      });
+      const data = response.data;
+      if (!response.ok) {
+        if (discoverPrompt.trim()) {
+          setMessage("Готовых вариантов из инвентаря не нашел. Показываю разбор запроса.");
+          await runLookup(discoverPrompt, { loading: false });
+        } else {
+          setMessage(data.error ?? "Не удалось подобрать коктейли.");
+        }
+        return;
+      }
 
-    setGeneration(nextGeneration);
-    saveRecipeGeneration(nextGeneration);
-    setInventory(nextGeneration.inventorySnapshot);
-    if (nextGeneration.recipes.length === 0 && discoverPrompt.trim()) {
-      setMessage("Сейчас не нашел готовые варианты под инвентарь. Показываю research по запросу.");
-      await runLookup(discoverPrompt, { loading: false });
-    } else {
-      setMessage(nextGeneration.recipes.length ? "" : "Сейчас не нашел подтвержденные варианты под текущий инвентарь.");
+      const nextGeneration: RecipeGeneration = {
+        mode: "discover",
+        recipes: data.recipes ?? [],
+        model: data.model ?? "unknown",
+        inventorySnapshot: data.inventorySnapshot ?? inventory,
+        sources: data.sources ?? [],
+        historyId: data.historyId ?? "",
+        requestPrompt: data.requestPrompt ?? discoverPrompt,
+        result: data.result,
+      };
+      setGeneration(nextGeneration);
+      saveRecipeGeneration(nextGeneration);
+      setInventory(nextGeneration.inventorySnapshot);
+      if (nextGeneration.recipes.length === 0 && discoverPrompt.trim()) {
+        setMessage("Готовых вариантов нет. Показываю разбор запроса.");
+        await runLookup(discoverPrompt, { loading: false });
+      } else {
+        setMessage(nextGeneration.recipes.length ? "" : "Подтвержденных вариантов под текущий инвентарь пока нет.");
+      }
+    } catch (error) {
+      setMessage(errorMessage(error, "Подбор прервался. Попробуйте еще раз."));
+    } finally {
+      setLoadingMode(null);
     }
   }
 
@@ -347,21 +406,25 @@ export function RecipeLab() {
       return;
     }
 
-    const response = await fetch("/api/recipes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recipe,
-        inventorySnapshot: context.inventorySnapshot,
-        model: context.model,
-        requestPrompt: context.requestPrompt,
-      }),
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      setSavedRecipeIds((current) => new Set([...current, data.recipe.id]));
+    try {
+      const response = await requestJson<{ recipe?: { id: string }; error?: string }>("/api/recipes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipe,
+          inventorySnapshot: context.inventorySnapshot,
+          model: context.model,
+          requestPrompt: context.requestPrompt,
+        }),
+      }, 30_000);
+      if (!response.ok || !response.data.recipe) {
+        setMessage(response.data.error ?? "Не удалось сохранить рецепт.");
+        return;
+      }
+      setSavedRecipeIds((current) => new Set([...current, response.data.recipe!.id]));
       setSavedTitleKeys((current) => new Set([...current, recipeTitleKey(recipe.title)]));
+    } catch (error) {
+      setMessage(errorMessage(error, "Не удалось сохранить рецепт."));
     }
   }
 
@@ -374,7 +437,7 @@ export function RecipeLab() {
       return null;
     }
 
-    const missing = (lookupResult.missingIngredients ?? []).map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}`);
+    const missing = (lookupResult.missingIngredients ?? []).map((item) => `${item.name}${item.amount ? ` · нужно ${item.amount}` : ""}${item.reason === "INSUFFICIENT" ? ` · есть ${item.availableAmount ?? "меньше"}` : ""}`);
     const shopping = (lookupResult.shoppingList ?? []).map((item) => `${item.name}${item.amount ? ` · ${item.amount}` : ""}${item.note ? ` · ${item.note}` : ""}`);
     const adaptedRecipe = lookupResult.adaptedRecipe;
     const alternatives = lookupResult.alternatives ?? [];
@@ -418,7 +481,7 @@ export function RecipeLab() {
             </div>
             <div className="recipe-grid">
               {alternatives.map((recipe) => (
-                <RecipeCard key={`alternative-${recipe.title}`} recipe={recipe} saved={isSaved(recipe)} onSave={() => save(recipe, lookupResult)} />
+                <RecipeCard key={`alternative-${recipe.title}`} recipe={recipe} saved={isSaved(recipe)} onSave={() => save(recipe, lookupResult)} compact />
               ))}
             </div>
           </section>
@@ -447,7 +510,7 @@ export function RecipeLab() {
         </div>
         <div className="recipe-grid">
           {recipes.map((recipe) => (
-            <RecipeCard key={`${title}-${recipe.title}`} recipe={recipe} saved={isSaved(recipe)} onSave={() => save(recipe, generation)} />
+            <RecipeCard key={`${title}-${recipe.title}`} recipe={recipe} saved={isSaved(recipe)} onSave={() => save(recipe, generation)} compact />
           ))}
         </div>
       </section>
@@ -470,11 +533,11 @@ export function RecipeLab() {
       </section>
 
       <div className="mode-tabs" role="tablist" aria-label="Режим подбора">
-        <button className={mode === "lookup" ? "mode-tab selected" : "mode-tab"} type="button" onClick={() => setMode("lookup")}>
+        <button className={mode === "lookup" ? "mode-tab selected" : "mode-tab"} type="button" role="tab" aria-selected={mode === "lookup"} onClick={() => setMode("lookup")}>
           <Search size={18} />
           Найти рецепт
         </button>
-        <button className={mode === "discover" ? "mode-tab selected" : "mode-tab"} type="button" onClick={() => setMode("discover")}>
+        <button className={mode === "discover" ? "mode-tab selected" : "mode-tab"} type="button" role="tab" aria-selected={mode === "discover"} onClick={() => setMode("discover")}>
           <ListChecks size={18} />
           Что можно собрать
         </button>
@@ -482,7 +545,7 @@ export function RecipeLab() {
 
       {mode === "lookup" ? (
         <section className="workflow-panel">
-          <div className="prompt-row">
+          <form className="prompt-row" onSubmit={lookup}>
             <label>
               Название коктейля
               <input
@@ -492,14 +555,14 @@ export function RecipeLab() {
                 placeholder="Например: коктейль черный русский"
               />
             </label>
-            <button className="primary-button large" type="button" onClick={lookup} disabled={loadingMode !== null || !lookupPrompt.trim()}>
+            <button className="primary-button large" type="submit" disabled={loadingMode !== null || !lookupPrompt.trim()}>
               <Search size={19} />
               {loadingMode === "lookup" ? "Ищу..." : "Найти"}
             </button>
-          </div>
+          </form>
           <div className="quick-prompts">
             {["коктейль черный русский", "джонни сильверхенд"].map((example) => (
-              <button key={example} type="button" onClick={() => setLookupPrompt(example)}>
+              <button key={example} type="button" onClick={() => { setLookupPrompt(example); void runLookup(example); }} disabled={loadingMode !== null}>
                 {example}
               </button>
             ))}
@@ -508,7 +571,7 @@ export function RecipeLab() {
         </section>
       ) : (
         <section className="workflow-panel">
-          <div className="prompt-row stacked">
+          <form className="prompt-row stacked" onSubmit={generateDiscover}>
             <label>
               Пожелание
               <textarea
@@ -520,16 +583,16 @@ export function RecipeLab() {
               />
             </label>
             <div className="prompt-actions compact-actions">
-              <button className="primary-button large" type="button" onClick={generateDiscover} disabled={loadingMode !== null || !inventoryReady}>
+              <button className="primary-button large" type="submit" disabled={loadingMode !== null || (!inventoryReady && !discoverPrompt.trim())}>
                 <Sparkles size={19} />
-                {loadingMode === "discover" ? "Подбираю..." : "Подобрать"}
+                {loadingMode === "discover" ? "Подбираю..." : inventoryReady ? "Подобрать" : "Исследовать"}
               </button>
               <button className="secondary-button large" type="button" onClick={resetCurrentMode} disabled={loadingMode !== null}>
                 <RotateCcw size={18} />
                 Очистить
               </button>
             </div>
-          </div>
+          </form>
           {!inventoryReady ? (
             <div className="empty-state">
               <FlaskConical size={28} />
@@ -546,7 +609,7 @@ export function RecipeLab() {
           {lookupResult ? (
             <section className="result-section">
               <div className="section-heading compact">
-                <h2>Research по запросу</h2>
+                <h2>Разбор запроса</h2>
               </div>
               {renderLookupResult()}
             </section>
@@ -554,7 +617,12 @@ export function RecipeLab() {
         </section>
       )}
 
-      {message ? <div className={message.startsWith("Не удалось") || message.includes("не прошел") ? "form-error" : "form-note"}>{message}</div> : null}
+      {message ? (
+        <div className={message.startsWith("Не удалось") || message.includes("прервался") || message.includes("не прошел") ? "form-error" : "form-note"} aria-live="polite">
+          {loadingMode ? <LoaderCircle className="spin" size={18} /> : null}
+          {message}
+        </div>
+      ) : null}
     </div>
   );
 }

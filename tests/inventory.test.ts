@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasMatchingInventoryItem, heuristicNormalizeItem, inventoryUnitSchema, needsAIReview, normalizeText, uniqueAliases } from "@/lib/inventory";
+import { hasMatchingInventoryItem, hasSufficientInventoryAmount, heuristicNormalizeItem, inventoryUnitSchema, needsAIReview, normalizeText, parseRecipeAmount, uniqueAliases } from "@/lib/inventory";
 
 describe("inventory helpers", () => {
   it("normalizes Russian text for matching", () => {
@@ -15,6 +15,14 @@ describe("inventory helpers", () => {
     const item = heuristicNormalizeItem({ name: "Свежий лайм", kind: "INGREDIENT" });
     expect(item.category).toBe("citrus");
     expect(item.icon).toBe("Lemon");
+  });
+
+  it("recognizes common branded liqueurs added through the quick form", () => {
+    const item = heuristicNormalizeItem({ name: "Kahlua" });
+    expect(item.kind).toBe("ALCOHOL");
+    expect(item.category).toBe("liqueur");
+    expect(item.quantity).toBeNull();
+    expect(item.unit).toBeNull();
   });
 
   it("validates supported inventory units", () => {
@@ -44,5 +52,22 @@ describe("inventory helpers", () => {
         ["INGREDIENT"],
       ),
     ).toBe(true);
+  });
+
+  it("does not treat a broad category as an exact style match", () => {
+    expect(
+      hasMatchingInventoryItem(
+        "White rum",
+        [{ kind: "ALCOHOL", name: "Dark rum", category: "rum", description: "Темный выдержанный ром", aliases: ["dark rum"] }],
+        ["ALCOHOL"],
+      ),
+    ).toBe(false);
+  });
+
+  it("compares compatible recipe and inventory quantities", () => {
+    expect(parseRecipeAmount("примерно 4 cl")).toEqual({ family: "VOLUME", value: 40 });
+    expect(hasSufficientInventoryAmount("50 мл", { quantity: 40, unit: "мл" })).toBe(false);
+    expect(hasSufficientInventoryAmount("30 мл", { quantity: 0.04, unit: "л" })).toBe(true);
+    expect(hasSufficientInventoryAmount("50 мл", { quantity: null, unit: null })).toBeNull();
   });
 });

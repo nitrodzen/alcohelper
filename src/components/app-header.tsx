@@ -31,14 +31,14 @@ export function AppHeader() {
               const Icon = item.icon;
               const active = pathname === item.href;
               return (
-                <Link key={item.href} href={item.href} className={active ? "nav-link active" : "nav-link"}>
+                <Link key={item.href} href={item.href} className={active ? "nav-link active" : "nav-link"} aria-current={active ? "page" : undefined}>
                   <Icon size={18} />
                   <span>{item.label}</span>
                 </Link>
               );
             })}
           </nav>
-          <button className="icon-action" type="button" title="Выйти" onClick={() => signOut({ callbackUrl: "/auth/signin" })}>
+          <button className="icon-action" type="button" title="Выйти" aria-label="Выйти" onClick={() => signOut({ callbackUrl: "/auth/signin" })}>
             <LogOut size={19} />
           </button>
         </>

@@ -1,8 +1,12 @@
 import OpenAI from "openai";
+import { isIP } from "node:net";
 import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import {
+  findMatchingInventoryItem,
+  formatInventoryAmount,
   hasMatchingInventoryItem,
+  hasSufficientInventoryAmount,
   heuristicNormalizeItem,
   inventoryInputSchema,
   inventoryUnits,
@@ -19,6 +23,7 @@ import {
   shoppingListItemSchema,
   substitutionOptionSchema,
   tasteImpactSchema,
+  isBlockingTool,
   type AvailabilityCheck,
   type GeneratedRecipe,
   type GeneratedRecipes,
@@ -405,6 +410,25 @@ function isHttpSourceUrl(rawUrl: string): boolean {
   }
 }
 
+export function isSafeExternalSourceUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port) {
+      return false;
+    }
+    if (!hostname.includes(".") || hostname === "localhost" || /\.(?:localhost|local|internal|lan|home\.arpa)$/.test(hostname)) {
+      return false;
+    }
+    if (isIP(hostname) !== 0) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function decodeDuckDuckGoRedirect(rawUrl: string): string {
   try {
     const url = new URL(rawUrl, "https://duckduckgo.com");
@@ -434,7 +458,7 @@ function isLikelyRecipeResearchUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
     const host = url.hostname.toLowerCase();
-    if (!["http:", "https:"].includes(url.protocol)) {
+    if (!isSafeExternalSourceUrl(rawUrl)) {
       return false;
     }
     if (host.includes("google.") || host.includes("duckduckgo.") || host.includes("yandex.") || host.includes("bing.")) {
@@ -498,6 +522,9 @@ function knownRecipeResearchSources(prompt: string): SourceLink[] {
 
 function isTrustedRecipeSourceUrl(rawUrl: string): boolean {
   try {
+    if (!isSafeExternalSourceUrl(rawUrl)) {
+      return false;
+    }
     const hostname = new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, "");
     return trustedRecipeSourceDomains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
   } catch {
@@ -505,22 +532,67 @@ function isTrustedRecipeSourceUrl(rawUrl: string): boolean {
   }
 }
 
-async function fetchWithTimeout(fetchImpl: FetchLike, url: string, init: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  fetchImpl: FetchLike,
+  url: string,
+  init: RequestInit,
+  urlGuard: (candidate: string) => boolean = isSafeExternalSourceUrl,
+): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), sourceVerificationTimeoutMs);
 
   try {
-    return await fetchImpl(url, {
-      ...init,
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-        ...(init.headers ?? {}),
-      },
-    });
+    let currentUrl = url;
+    for (let redirectCount = 0; redirectCount <= 4; redirectCount += 1) {
+      if (!urlGuard(currentUrl)) {
+        throw new Error("Unsafe source URL");
+      }
+      const response = await fetchImpl(currentUrl, {
+        ...init,
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+          ...(init.headers ?? {}),
+        },
+      });
+      const location = response.headers.get("location");
+      if (response.status < 300 || response.status >= 400 || !location) {
+        return response;
+      }
+      currentUrl = new URL(location, currentUrl).href;
+    }
+    throw new Error("Too many source redirects");
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function readLimitedResponseText(response: Response, maxBytes = 1_500_000): Promise<string | null> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    return null;
+  }
+  if (!response.body) {
+    const text = await response.text();
+    return new TextEncoder().encode(text).byteLength <= maxBytes ? text : null;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let result = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return result + decoder.decode();
+    }
+    bytesRead += value.byteLength;
+    if (bytesRead > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    result += decoder.decode(value, { stream: true });
   }
 }
 
@@ -541,7 +613,10 @@ async function searchDuckDuckGoSources(prompt: string, fetchImpl: FetchLike): Pr
       if (!response.ok) {
         continue;
       }
-      const html = await response.text();
+      const html = await readLimitedResponseText(response);
+      if (!html) {
+        continue;
+      }
       const anchors = [...html.matchAll(/<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)];
       for (const match of anchors) {
         const decodedUrl = stripTrackingParams(decodeDuckDuckGoRedirect(decodeHtmlEntities(match[1])));
@@ -624,7 +699,7 @@ async function fetchVerifiedSourceContent(source: SourceLink, fetchImpl: FetchLi
   }
 
   try {
-    const head = await fetchWithTimeout(fetchImpl, source.url, { method: "HEAD" });
+    const head = await fetchWithTimeout(fetchImpl, source.url, { method: "HEAD" }, isTrustedRecipeSourceUrl);
     if (!(head.status >= 200 && head.status < 400) && ![403, 405, 429, 501].includes(head.status)) {
       return null;
     }
@@ -633,11 +708,19 @@ async function fetchVerifiedSourceContent(source: SourceLink, fetchImpl: FetchLi
   }
 
   try {
-    const get = await fetchWithTimeout(fetchImpl, source.url, { method: "GET" });
+    const get = await fetchWithTimeout(fetchImpl, source.url, { method: "GET" }, isTrustedRecipeSourceUrl);
     if (!(get.status >= 200 && get.status < 400)) {
       return null;
     }
-    const sourceContent = extractSourceContent(await get.text());
+    const contentType = get.headers.get("content-type") ?? "";
+    if (contentType && !contentType.includes("text/html") && !contentType.includes("text/plain") && !contentType.includes("application/xhtml") && !contentType.includes("application/json")) {
+      return null;
+    }
+    const body = await readLimitedResponseText(get);
+    if (!body) {
+      return null;
+    }
+    const sourceContent = extractSourceContent(body);
     return sourceContent.length >= 80 ? { source, sourceContent } : null;
   } catch {
     return null;
@@ -663,7 +746,11 @@ async function fetchResearchSourceContent(source: SourceLink, fetchImpl: FetchLi
     if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml") && !contentType.includes("application/json")) {
       return null;
     }
-    const sourceContent = extractSourceContent(await get.text());
+    const body = await readLimitedResponseText(get);
+    if (!body) {
+      return null;
+    }
+    const sourceContent = extractSourceContent(body);
     return sourceContent.length >= 160 ? { source, sourceContent } : null;
   } catch {
     return null;
@@ -917,19 +1004,36 @@ function buildSavedRecipesPayload(savedRecipes: SavedRecipeForAI[]) {
 function ingredientRoleFromText(value: string): string | null {
   const text = normalizeText(value);
 
-  if (text.match(/white rum|dark rum|rum|ром/)) return "rum";
+  if (text.match(/white rum|light rum|белый ром|светлый ром/)) return "rum-white";
+  if (text.match(/dark rum|black rum|spiced rum|темный ром|пряный ром/)) return "rum-dark";
+  if (text.match(/rum|ром/)) return "rum";
   if (text.match(/vodka|водк/)) return "vodka";
   if (text.match(/gin|джин/)) return "gin";
   if (text.match(/tequila|текил/)) return "tequila";
   if (text.match(/whiskey|whisky|bourbon|виски|бурбон/)) return "whiskey";
   if (text.match(/kahlua|coffee|кофе|калуа/)) return "coffee-liqueur";
-  if (text.match(/orange|triple sec|cointreau|curacao|curaçao|апельсин/)) return "orange-liqueur";
-  if (text.match(/chocolate|cream|сливоч|шоколад|baileys|бейлис/)) return "dessert-liqueur";
+  if (text.match(/triple sec|cointreau|curacao|curaçao|orange liqueur|апельсиновый ликер/)) return "orange-liqueur";
+  if (text.match(/chocolate liqueur|cream liqueur|сливочный ликер|шоколадный ликер|baileys|бейлис/)) return "dessert-liqueur";
+  if (text.match(/dry vermouth|сухой вермут/)) return "vermouth-dry";
+  if (text.match(/sweet vermouth|rosso|сладкий вермут|красный вермут/)) return "vermouth-sweet";
   if (text.match(/vermouth|martini|вермут/)) return "vermouth";
   if (text.match(/bitters|angostura|bitter|биттер|ангостур/)) return "bitter";
-  if (text.match(/lime|lemon|citrus|лайм|лимон|цитрус/)) return "citrus";
+  if (text.match(/lime|лайм/)) return "citrus-lime";
+  if (text.match(/lemon|лимон/)) return "citrus-lemon";
+  if (text.match(/citrus|цитрус/)) return "citrus";
+  if (text.match(/agave syrup|сироп агав/)) return "syrup-agave";
+  if (text.match(/honey syrup|медовый сироп/)) return "syrup-honey";
+  if (text.match(/simple syrup|sugar syrup|сахарный сироп|простой сироп/)) return "syrup-simple";
   if (text.match(/syrup|сироп/)) return "syrup";
-  if (text.match(/cola|tonic|soda|sprite|газ|тоник|кола/)) return "sparkling-mixer";
+  if (text.match(/cola|coca cola|pepsi|кола/)) return "mixer-cola";
+  if (text.match(/tonic|тоник/)) return "mixer-tonic";
+  if (text.match(/soda|soda water|club soda|содовая/)) return "mixer-soda";
+  if (text.match(/sprite|7up|lemon lime soda|спрайт/)) return "mixer-lemon-lime";
+  if (text.match(/ginger beer|ginger ale|имбирное пиво|имбирный эль/)) return "mixer-ginger";
+  if (text.match(/orange juice|апельсиновый сок/)) return "juice-orange";
+  if (text.match(/cranberry juice|клюквенный сок/)) return "juice-cranberry";
+  if (text.match(/pineapple juice|ананасовый сок/)) return "juice-pineapple";
+  if (text.match(/tomato juice|томатный сок/)) return "juice-tomato";
   if (text.match(/juice|сок/)) return "juice";
 
   return null;
@@ -971,12 +1075,46 @@ function maxTasteImpact(impacts: TasteImpact[]): TasteImpact {
   return impacts.reduce((max, current) => (order[current.level] > order[max.level] ? current : max));
 }
 
+function combinedSubstitutionImpact(substitutions: SubstitutionOption[]): TasteImpact {
+  const impact = maxTasteImpact(substitutions.map((substitution) => substitution.tasteImpact));
+  if (substitutions.length >= 2 && impact.level === "MEDIUM") {
+    return tasteImpact("HIGH", "Несколько заметных замен одновременно слишком сильно меняют баланс оригинального коктейля.");
+  }
+  if (substitutions.length >= 3 && impact.level === "LOW") {
+    return tasteImpact("HIGH", "Три и более замены делают результат слишком далеким от оригинального рецепта.");
+  }
+  if (substitutions.length >= 2 && impact.level === "LOW") {
+    return tasteImpact("MEDIUM", "Несколько небольших замен вместе будут заметны во вкусе.");
+  }
+  return impact;
+}
+
 function conservativeRoleCompatibility(originalRole: string | null, substituteRole: string | null): TasteImpact | null {
   if (!originalRole || !substituteRole) {
     return null;
   }
   if (originalRole === substituteRole) {
     return tasteImpact("LOW", "Замена остается в той же вкусовой роли, вкус должен измениться слабо.");
+  }
+  const [originalFamily] = originalRole.split("-");
+  const [substituteFamily] = substituteRole.split("-");
+  if (originalFamily === "rum" && substituteFamily === "rum") {
+    return tasteImpact("MEDIUM", "Стиль рома изменит плотность, сладость и аромат, но базовая роль сохранится.");
+  }
+  if (originalFamily === "vermouth" && substituteFamily === "vermouth") {
+    return tasteImpact("MEDIUM", "Сухость и сладость вермута изменят баланс коктейля.");
+  }
+  if (originalFamily === "citrus" && substituteFamily === "citrus") {
+    return tasteImpact("MEDIUM", "Лимон и лайм дают разную кислотность и аромат; замена заметна, но обычно управляема.");
+  }
+  if (originalFamily === "syrup" && substituteFamily === "syrup") {
+    return tasteImpact("MEDIUM", "Тип сиропа изменит сладость и аромат, поэтому баланс придется корректировать.");
+  }
+  if (originalFamily === "mixer" && substituteFamily === "mixer") {
+    return tasteImpact("HIGH", "Газированные миксеры различаются горечью, сладостью и ароматом; это уже другой вкусовой профиль.");
+  }
+  if (originalFamily === "juice" && substituteFamily === "juice") {
+    return tasteImpact("HIGH", "Другой сок меняет основную фруктовую ноту и баланс коктейля.");
   }
   if (originalRole === "coffee-liqueur" && substituteRole === "dessert-liqueur") {
     return tasteImpact("MEDIUM", "Кофейная горечь уйдет в шоколадно-сливочный профиль; это заметная, но понятная десертная замена.");
@@ -1001,6 +1139,7 @@ function findConservativeSubstitution(
   const originalRole = ingredientRoleFromText(missing.name);
   const candidates = inventory
     .filter((item) => item.kind !== "TOOL")
+    .filter((item) => !hasMatchingInventoryItem(missing.name, [item], ["ALCOHOL", "INGREDIENT"]))
     .map((item) => ({
       item,
       impact: conservativeRoleCompatibility(originalRole, inventoryRole(item)),
@@ -1053,48 +1192,70 @@ function applySubstitutionsToRecipe(recipe: GeneratedRecipe, substitutions: Subs
 }
 
 export function buildLocalRecipeInventoryAssessment(recipe: GeneratedRecipe, inventory: InventoryForAI[]): RecipeInventoryAssessment {
-  const missingIngredients = recipe.ingredients
-    .filter((ingredient) => !ingredient.optional && !hasMatchingInventoryItem(ingredient.name, inventory, ["ALCOHOL", "INGREDIENT"]))
-    .map((ingredient) => ({
-      name: ingredient.name,
-      amount: ingredient.amount,
-      kind: "INGREDIENT" as const,
-    }));
-  const missingTools = recipe.tools
+  const missingIngredients: MissingIngredient[] = [];
+  for (const ingredient of recipe.ingredients) {
+    if (ingredient.optional) {
+      continue;
+    }
+    const item = findMatchingInventoryItem(ingredient.name, inventory, ["ALCOHOL", "INGREDIENT"]);
+    if (!item) {
+      missingIngredients.push({ name: ingredient.name, amount: ingredient.amount, kind: "INGREDIENT", reason: "ABSENT" });
+      continue;
+    }
+    if (hasSufficientInventoryAmount(ingredient.amount, item) === false) {
+      missingIngredients.push({
+        name: ingredient.name,
+        amount: ingredient.amount,
+        kind: "INGREDIENT",
+        reason: "INSUFFICIENT",
+        availableAmount: formatInventoryAmount(item),
+      });
+    }
+  }
+  const missingTools: MissingIngredient[] = recipe.tools
     .filter((tool) => !tool.optional && !hasMatchingInventoryItem(tool.name, inventory, ["TOOL"]))
     .map((tool) => ({
       name: tool.name,
       kind: "TOOL" as const,
+      reason: "ABSENT" as const,
     }));
+  const blockingMissingTools = missingTools.filter((tool) => isBlockingTool(tool.name));
   const missing = [...missingIngredients, ...missingTools];
   const shoppingList = missing.map((item) => ({
     name: item.name,
-    amount: "amount" in item ? item.amount : undefined,
-    note: item.kind === "TOOL" ? "Нужен инструмент для корректной подачи/приготовления." : "Нужен для оригинального рецепта.",
+    amount: item.amount,
+    note: item.kind === "TOOL"
+      ? isBlockingTool(item.name)
+        ? "Нужен для технологии приготовления."
+        : "Покупать необязательно: подойдет близкий бытовой аналог."
+      : item.reason === "INSUFFICIENT"
+        ? `В наличии ${item.availableAmount ?? "меньше нужного"}; требуется ${item.amount ?? "больше"}.`
+        : "Нужен для оригинального рецепта.",
   }));
 
-  if (missing.length === 0) {
+  if (missingIngredients.length === 0 && blockingMissingTools.length === 0) {
     return {
       adaptedRecipe: null,
       makeability: "AVAILABLE",
-      missingIngredients: [],
-      shoppingList: [],
+      missingIngredients: missing,
+      shoppingList,
       substitutionOptions: [],
-      tasteImpact: tasteImpact("NONE", "Все обязательные компоненты есть в инвентаре."),
-      warnings: [],
+      tasteImpact: tasteImpact("NONE", "Все обязательные ингредиенты есть в инвентаре."),
+      warnings: missingTools.map((tool) => `${tool.name} можно заменить подходящим бытовым инструментом.`),
     };
   }
 
   const substitutions = missingIngredients
+    .filter((item) => item.reason !== "INSUFFICIENT")
     .map((item) => findConservativeSubstitution(item, inventory))
     .filter((item): item is SubstitutionOption => item !== null);
   const substitutedOriginals = new Set(substitutions.filter((item) => item.recommended && item.tasteImpact.level !== "HIGH").map((item) => normalizeText(item.original)));
   const allIngredientGapsCovered = missingIngredients.every((item) => substitutedOriginals.has(normalizeText(item.name)));
-  const hasMissingTools = missingTools.length > 0;
+  const hasMissingTools = blockingMissingTools.length > 0;
 
   if (!hasMissingTools && allIngredientGapsCovered && substitutions.length > 0) {
     const adaptedRecipe = applySubstitutionsToRecipe(recipe, substitutions);
-    const impact = maxTasteImpact(substitutions.map((substitution) => substitution.tasteImpact));
+    const impact = combinedSubstitutionImpact(substitutions);
     return {
       adaptedRecipe,
       makeability: impact.level === "HIGH" ? "NOT_RECOMMENDED" : "AVAILABLE_WITH_SUBSTITUTIONS",
@@ -1128,11 +1289,11 @@ function normalizeAiAssessment(
   }
 
   const inventoryByName = new Map(inventory.map((item) => [normalizeText(item.name), item]));
-  const missingIngredientKeys = new Set(local.missingIngredients.filter((item) => item.kind !== "TOOL").map((item) => normalizeText(item.name)));
+  const missingIngredientKeys = new Set(local.missingIngredients.filter((item) => item.kind !== "TOOL" && item.reason !== "INSUFFICIENT").map((item) => normalizeText(item.name)));
   const validSubstitutions: SubstitutionOption[] = [];
   for (const substitution of parsed.substitutionOptions) {
     const item = inventoryByName.get(normalizeText(substitution.substitute));
-    if (!item || !missingIngredientKeys.has(normalizeText(substitution.original))) {
+    if (!item || !missingIngredientKeys.has(normalizeText(substitution.original)) || normalizeText(substitution.original) === normalizeText(substitution.substitute)) {
       continue;
     }
     validSubstitutions.push({
@@ -1145,7 +1306,7 @@ function normalizeAiAssessment(
   const highImpactSubstitutions = validSubstitutions.filter((item) => !item.recommended || item.tasteImpact.level === "HIGH");
   const recommendedOriginals = new Set(recommendedSubstitutions.map((item) => normalizeText(item.original)));
   const missingIngredients = local.missingIngredients.filter((item) => item.kind !== "TOOL");
-  const hasMissingTools = local.missingIngredients.some((item) => item.kind === "TOOL");
+  const hasMissingTools = local.missingIngredients.some((item) => item.kind === "TOOL" && isBlockingTool(item.name));
   const allCovered = missingIngredients.length > 0 && missingIngredients.every((item) => recommendedOriginals.has(normalizeText(item.name)));
 
   if (hasMissingTools) {
@@ -1170,7 +1331,18 @@ function normalizeAiAssessment(
 
   if (allCovered) {
     const adaptedRecipe = parsed.adaptedRecipe ? normalizeAiGeneratedRecipes({ recipes: [parsed.adaptedRecipe] }).recipes[0] : applySubstitutionsToRecipe(recipe, recommendedSubstitutions);
-    const impact = maxTasteImpact(recommendedSubstitutions.map((substitution) => substitution.tasteImpact));
+    const impact = combinedSubstitutionImpact(recommendedSubstitutions);
+    if (impact.level === "HIGH") {
+      return {
+        adaptedRecipe: null,
+        makeability: "NOT_RECOMMENDED",
+        missingIngredients: local.missingIngredients,
+        shoppingList: local.shoppingList,
+        substitutionOptions: recommendedSubstitutions,
+        tasteImpact: impact,
+        warnings: [impact.summary, ...parsed.warnings].slice(0, 8),
+      };
+    }
     return {
       adaptedRecipe: {
         ...adaptedRecipe,
@@ -1241,6 +1413,7 @@ async function assessRecipeAgainstInventoryWithAI(
 function annotateRecipeWithAssessment(recipe: GeneratedRecipe, assessment: RecipeInventoryAssessment, sourceStatus: "VERIFIED" | "UNVERIFIED" | "FAILED" = "VERIFIED"): GeneratedRecipe {
   return {
     ...recipe,
+    warnings: [...new Set([...recipe.warnings, ...assessment.warnings])].slice(0, 8),
     makeability: assessment.makeability,
     missingIngredients: assessment.missingIngredients,
     shoppingList: assessment.shoppingList,
@@ -1262,7 +1435,7 @@ function annotateDiscoveredRecipe(recipe: GeneratedRecipe, inventory: InventoryF
     ...local,
     makeability: isSubstitution ? "AVAILABLE_WITH_SUBSTITUTIONS" : "AVAILABLE",
     tasteImpact: isSubstitution
-      ? tasteImpact("LOW", "Рецепт уже адаптирован под имеющийся инвентарь; замена должна быть небольшой.")
+      ? tasteImpact("MEDIUM", "Рецепт адаптирован под инвентарь; влияние замены проверено по источнику, но будет заметно.")
       : local.tasteImpact,
     warnings: recipe.warnings,
   };
