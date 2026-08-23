@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { isRegistrationAllowed } from "@/lib/registration";
+import { isRegistrationAllowedForSignup } from "@/lib/registration-access";
 import { seedInitialInventoryForUser } from "@/lib/seed";
 
 export const runtime = "nodejs";
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   }
 
   const email = parsed.data.email.toLowerCase();
-  if (!isRegistrationAllowed(email)) {
+  if (!(await isRegistrationAllowedForSignup(email))) {
     return NextResponse.json({ error: "Этот email не включен в список приглашенных." }, { status: 403 });
   }
 

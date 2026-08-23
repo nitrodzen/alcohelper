@@ -87,3 +87,13 @@ model RecipeRequestHistory {
 
   @@index([userId, createdAt])
 }
+
+model RegistrationAllowlistEntry {
+  id              String   @id @default(cuid())
+  email           String   @unique
+  createdByUserId String
+  createdByEmail  String
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt])
+}

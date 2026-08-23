@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
-import { BookMarked, Boxes, Clock3, LogOut, Martini, Sparkles } from "lucide-react";
+import { BookMarked, Boxes, Clock3, LogOut, Martini, ShieldCheck, Sparkles } from "lucide-react";
+import { isPortalAdminEmail } from "@/lib/admin-config";
 
 const nav = [
   { href: "/", label: "Подбор", icon: Sparkles },
@@ -15,6 +16,7 @@ const nav = [
 export function AppHeader() {
   const pathname = usePathname();
   const { data: session } = useSession();
+  const isAdmin = isPortalAdminEmail(session?.user?.email);
 
   return (
     <header className="app-header">
@@ -38,9 +40,22 @@ export function AppHeader() {
               );
             })}
           </nav>
-          <button className="icon-action" type="button" title="Выйти" aria-label="Выйти" onClick={() => signOut({ callbackUrl: "/auth/signin" })}>
-            <LogOut size={19} />
-          </button>
+          <div className="header-actions">
+            {isAdmin ? (
+              <Link
+                href="/admin/allowlist"
+                className={pathname === "/admin/allowlist" ? "icon-action active" : "icon-action"}
+                title="Управление доступом"
+                aria-label="Управление доступом"
+                aria-current={pathname === "/admin/allowlist" ? "page" : undefined}
+              >
+                <ShieldCheck size={19} />
+              </Link>
+            ) : null}
+            <button className="icon-action" type="button" title="Выйти" aria-label="Выйти" onClick={() => signOut({ callbackUrl: "/auth/signin" })}>
+              <LogOut size={19} />
+            </button>
+          </div>
         </>
       ) : null}
     </header>

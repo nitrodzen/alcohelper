@@ -96,6 +96,12 @@ button:disabled {
   gap: 8px;
 }
 
+.header-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .nav-link {
   align-items: center;
   border-radius: 8px;
@@ -270,6 +276,12 @@ select {
   color: var(--danger);
 }
 
+.icon-action.active {
+  background: var(--accent-soft);
+  border-color: #9bd2bd;
+  color: var(--accent-dark);
+}
+
 .auth-switch,
 .form-error,
 .form-note {
@@ -350,12 +362,137 @@ select {
 .list-panel,
 .recipe-card,
 .recipe-hero,
-.saved-page {
+.saved-page,
+.admin-page {
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
   padding: 24px;
+}
+
+.admin-page {
+  margin: 0 auto;
+  max-width: 900px;
+}
+
+.admin-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 14px;
+  margin-bottom: 26px;
+}
+
+.admin-heading h1 {
+  font-size: 2rem;
+  margin: 3px 0 8px;
+}
+
+.admin-heading p,
+.allowlist-list-heading p {
+  margin-bottom: 0;
+}
+
+.admin-heading-icon,
+.allowlist-mail-icon {
+  align-items: center;
+  background: var(--accent-soft);
+  border: 1px solid #c8e5d9;
+  border-radius: 8px;
+  color: var(--accent-dark);
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+}
+
+.admin-heading-icon {
+  height: 44px;
+  width: 44px;
+}
+
+.admin-eyebrow {
+  color: var(--accent-dark);
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.admin-content {
+  display: grid;
+  gap: 28px;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(0, 1.2fr);
+}
+
+.allowlist-form {
+  align-content: start;
+  display: grid;
+  gap: 12px;
+}
+
+.allowlist-form .form-error,
+.allowlist-form .form-note {
+  margin-top: 0;
+}
+
+.allowlist-section {
+  border-left: 1px solid var(--line);
+  min-width: 0;
+  padding-left: 28px;
+}
+
+.allowlist-list-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.allowlist-list-heading h2 {
+  margin-bottom: 4px;
+}
+
+.allowlist-list,
+.allowlist-loading {
+  border-top: 1px solid var(--line);
+}
+
+.allowlist-loading {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  padding: 18px 0;
+}
+
+.allowlist-row {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 11px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 70px;
+  padding: 10px 0;
+}
+
+.allowlist-mail-icon {
+  height: 36px;
+  width: 36px;
+}
+
+.allowlist-entry-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.allowlist-entry-copy strong {
+  overflow-wrap: anywhere;
+}
+
+.allowlist-entry-copy span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
 }
 
 .section-heading,
@@ -1154,7 +1291,7 @@ select {
     text-align: center;
   }
 
-  .app-header > .icon-action {
+  .header-actions {
     margin-left: auto;
   }
 
@@ -1169,6 +1306,17 @@ select {
   .recipe-grid,
   .recipe-method-body {
     grid-template-columns: 1fr;
+  }
+
+  .admin-content {
+    grid-template-columns: 1fr;
+  }
+
+  .allowlist-section {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding-left: 0;
+    padding-top: 24px;
   }
 
   .compact-strip {
@@ -1246,11 +1394,11 @@ select {
   }
 
   .quick-prompts button,
-  .app-header > .icon-action {
+  .header-actions .icon-action {
     min-height: 44px;
   }
 
-  .app-header > .icon-action {
+  .header-actions .icon-action {
     min-width: 44px;
   }
 
@@ -1258,8 +1406,13 @@ select {
   .list-panel,
   .recipe-card,
   .saved-page,
+  .admin-page,
   .auth-panel {
     padding: 18px;
+  }
+
+  .admin-heading h1 {
+    font-size: 1.7rem;
   }
 
   .auth-shell {

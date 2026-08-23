@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getRegistrationAllowlist, isRegistrationAllowed } from "@/lib/registration";
+import { getRegistrationAllowlist, isRegistrationAllowed, normalizeRegistrationEmail } from "@/lib/registration";
 
 describe("registration allowlist", () => {
   it("allows exact invited emails case-insensitively", () => {
@@ -21,5 +21,10 @@ describe("registration allowlist", () => {
   it("fails closed when no invitations are configured", () => {
     expect(isRegistrationAllowed("person@example.com", {})).toBe(false);
     expect(getRegistrationAllowlist({})).toEqual({ emails: new Set(), domains: new Set() });
+  });
+
+  it("normalizes valid addresses and rejects malformed values", () => {
+    expect(normalizeRegistrationEmail(" Friend@Example.com ")).toBe("friend@example.com");
+    expect(normalizeRegistrationEmail("not-an-email")).toBeNull();
   });
 });

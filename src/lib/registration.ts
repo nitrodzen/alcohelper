@@ -1,4 +1,4 @@
-type RegistrationEnvironment = {
+export type RegistrationEnvironment = {
   REGISTRATION_ALLOWED_EMAILS?: string;
   REGISTRATION_ALLOWED_DOMAINS?: string;
 };
@@ -26,14 +26,23 @@ export function getRegistrationAllowlist(environment: RegistrationEnvironment = 
   };
 }
 
-export function isRegistrationAllowed(email: string, environment: RegistrationEnvironment = currentEnvironment()): boolean {
+export function normalizeRegistrationEmail(email: string): string | null {
   const normalizedEmail = email.trim().toLowerCase();
   const separatorIndex = normalizedEmail.lastIndexOf("@");
   if (separatorIndex <= 0 || separatorIndex === normalizedEmail.length - 1) {
+    return null;
+  }
+  return normalizedEmail;
+}
+
+export function isRegistrationAllowed(email: string, environment: RegistrationEnvironment = currentEnvironment()): boolean {
+  const normalizedEmail = normalizeRegistrationEmail(email);
+  if (!normalizedEmail) {
     return false;
   }
 
   const { emails, domains } = getRegistrationAllowlist(environment);
+  const separatorIndex = normalizedEmail.lastIndexOf("@");
   const domain = normalizedEmail.slice(separatorIndex + 1);
   return emails.has(normalizedEmail) || domains.has(domain);
 }
