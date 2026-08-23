@@ -1255,6 +1255,7 @@ select {
 
 @media (max-width: 920px) {
   .app-header {
+    backdrop-filter: none;
     min-height: 62px;
     padding: 9px 16px;
   }
